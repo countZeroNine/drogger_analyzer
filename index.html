@@ -1,5 +1,4 @@
 <!DOCTYPE html>
-
 <html lang="ja">
 <head>
   <meta charset="UTF-8" />
@@ -7,29 +6,22 @@
   <title>Drogger // Telemetry — Endurance Analyzer</title>
 
   <!-- Tailwind (JIT, supports arbitrary values like bg-[#111720]) -->
-
   <script src="https://cdn.tailwindcss.com"></script>
 
   <!-- React / ReactDOM -->
-
   <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
 
   <!-- PapaParse for CSV parsing -->
-
   <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
 
   <!-- Babel for in-browser JSX compilation -->
-
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <!-- Vercel Analytics (anonymous page view tracking) -->
-
   <script>
     window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
   </script>
-
   <script defer src="/_vercel/insights/script.js"></script>
 
   <style>
@@ -44,7 +36,6 @@
               color: #6b7280; font-family: ui-monospace, monospace; font-size: 11px; letter-spacing: 0.18em;
               text-transform: uppercase; }
   </style>
-
 </head>
 <body>
   <div id="loader">Booting Telemetry…</div>
@@ -65,8 +56,20 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const CHANGELOG = [
+  {
+    version: "1.5.0",
+    date: "2026-05-06",
+    notes: [
+      "aRacer ECUログ（.loga）の3形式に対応：スマホ録画／ECU内部メモリ／Logger Module",
+      "ファイル形式を自動判別、Drogger CSV と aRacer .loga を同じUIで扱える",
+      "aRacer Logger ModuleのGPS情報（NMEA形式）をデコードしてTrack機能を有効化",
+      "GPS軌跡からのラップ自動検出（aRacer LMはIR_LapNumberが空のため自動算出）",
+      "GPS情報の有無に応じてTrack / Compareタブを自動制御",
+      "セッション一覧にソース種別バッジ（DRG/aR-SP/aR-ECU/aR-LM）を追加",
+    ],
+  },
   {
     version: "1.4.0",
     date: "2026-05-06",
@@ -264,7 +267,200 @@ const sampleAtElapsed = (lap, elapsedSec) => {
 };
 
 // ─── Parse one Drogger CSV ───────────────────────────────────────
-const parseSession = (rawData, name, type) => {
+// ─── Log file format detection ───────────────────────────────────
+// Returns one of: 'drogger', 'aracer_sp', 'aracer_ecu', 'aracer_lm', 'unknown'
+const detectLogFormat = (text) => {
+  const firstLine = text.split("\n", 1)[0].trim();
+  if (firstLine.startsWith("<aRacer APP Log Data for RaceAMP>"))     return "aracer_sp";
+  if (firstLine.startsWith("<Cycling Memory Log Data of Super ECU>")) return "aracer_ecu";
+  if (firstLine.startsWith("<aRacer ECU_Memory Log Data for RaceAMP>")) return "aracer_lm";
+  // Drogger CSV starts with column header line containing common field names
+  if (firstLine.includes("Lap") && firstLine.includes("Rpm") && firstLine.includes("RunTime")) return "drogger";
+  return "unknown";
+};
+
+// ─── aRacer .loga parser ─────────────────────────────────────────
+// Returns array of records compatible with parseSession (Drogger-style fields)
+// All 3 aRacer formats share the same structure:
+//   L1: <type marker>
+//   L2-4: metadata (date, ID, version)
+//   L5: stage/flag classification (ignored)
+//   L6: column headers
+//   L7+: data rows
+const parseAracerLog = (text, format) => {
+  const lines = text.split(/\r?\n/);
+  if (lines.length < 8) throw new Error("aRacer ログのデータ行が不足しています");
+
+  const headers = lines[5].split(",");
+  // Helper: find column index by matching tail of name (after last dot, before slash)
+  // e.g. "Fuel.NBO2_BL_En/" → "NBO2_BL_En", "IR_LapNumber/圈數" → "IR_LapNumber"
+  const normalizeHeader = (h) => {
+    const beforeSlash = h.split("/")[0];
+    const afterDot = beforeSlash.split(".").pop();
+    return afterDot.trim().toLowerCase();
+  };
+  const normalizedHeaders = headers.map(normalizeHeader);
+  const findIdx = (...patterns) => {
+    for (const p of patterns) {
+      const idx = normalizedHeaders.indexOf(p.toLowerCase());
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+
+  const idx = {
+    Rpm:          findIdx("rpm"),
+    Speed:        findIdx("vehicle_speed_filtered", "vehicle_speed", "gps_speed"),
+    Afr:          findIdx("afr_wbo2_cal", "afr"),
+    ThrottolePos: findIdx("tps_percent"),
+    Voltage:      findIdx("volt_batt_indx"),
+    Lap:          findIdx("ir_lapnumber"),
+    LapTime:      findIdx("ir_laptime"),
+    LeanAngle:    findIdx("tc_lean_angle"),
+    GearNum:      findIdx("gearnum"),
+    GpsLatDeg:    findIdx("gps_lat_deg"),
+    GpsLatMin:    findIdx("gps_lat_min"),
+    GpsLatMmmm:   findIdx("gps_lat_mmmm"),
+    GpsLatNS:     findIdx("gps_lat_ns"),
+    GpsLonDeg:    findIdx("gps_lon_deg"),
+    GpsLonMin:    findIdx("gps_lon_min"),
+    GpsLonMmmm:   findIdx("gps_lon_mmmm"),
+    GpsLonEW:     findIdx("gps_lon_ew"),
+  };
+  const hasGpsCols = idx.GpsLatDeg >= 0 && idx.GpsLatMin >= 0 && idx.GpsLatMmmm >= 0;
+
+  // Sampling rate auto-detect: if first 100 rows imply > 12 Hz, downsample to ~10 Hz
+  const probeRows = Math.min(100, lines.length - 7);
+  let sampleStride = 1;
+  if (probeRows > 10) {
+    const t0 = parseFloat(lines[6].split(",")[0]);
+    const tEnd = parseFloat(lines[6 + probeRows - 1].split(",")[0]);
+    if (!isNaN(t0) && !isNaN(tEnd) && tEnd > t0) {
+      const hz = (probeRows - 1) / ((tEnd - t0) / 1000);
+      if (hz > 12) sampleStride = Math.max(1, Math.round(hz / 10));
+    }
+  }
+
+  const data = [];
+  let hasAnyGps = false;
+
+  // Parse data rows
+  for (let li = 6; li < lines.length; li += sampleStride) {
+    const line = lines[li];
+    if (!line || !line.length) continue;
+    const parts = line.split(",");
+    const tMs = parseFloat(parts[0]);
+    if (isNaN(tMs)) continue;
+
+    const num = (i) => i >= 0 && i < parts.length ? (parseFloat(parts[i]) || 0) : 0;
+    const intNum = (i) => i >= 0 && i < parts.length ? (parseInt(parts[i], 10) || 0) : 0;
+
+    let lat = 0, lon = 0;
+    if (hasGpsCols) {
+      const ld = num(idx.GpsLatDeg);
+      if (ld > 0) {
+        const lm = num(idx.GpsLatMin);
+        const lmm = num(idx.GpsLatMmmm);
+        lat = ld + (lm + lmm / 10000) / 60;
+        const od = num(idx.GpsLonDeg);
+        const om = num(idx.GpsLonMin);
+        const omm = num(idx.GpsLonMmmm);
+        lon = od + (om + omm / 10000) / 60;
+        // NS/EW stored as ASCII codes: N=78, S=83, E=69, W=87
+        const ns = intNum(idx.GpsLatNS);
+        const ew = intNum(idx.GpsLonEW);
+        if (ns === 83) lat = -lat; // South
+        if (ew === 87) lon = -lon; // West
+        hasAnyGps = true;
+      }
+    }
+
+    data.push({
+      RunTime:      tMs / 1000,
+      LapRunTime:   0, // computed later
+      LapTime:      num(idx.LapTime),
+      Lap:          intNum(idx.Lap),
+      Rpm:          num(idx.Rpm),
+      Speed:        num(idx.Speed),
+      Afr:          num(idx.Afr),
+      ThrottolePos: num(idx.ThrottolePos),
+      Voltage:      num(idx.Voltage),
+      Latitude:     lat,
+      Longitude:    lon,
+      Front: 0, Rear: 0, T1: 0, T2: 0, T3: 0, RearSpeed: 0, accuracy: 0,
+    });
+  }
+
+  return { data, hasGps: hasAnyGps, format, sampleStride };
+};
+
+// ─── GPS-based lap detection (for aRacer LM where IR_LapNumber is empty) ─
+// Strategy: lap completes when GPS returns close to origin AFTER traveling far enough away.
+// Origin = first valid GPS sample.
+// Returns: data with Lap field updated, LapTime/LapRunTime set per Drogger semantics.
+const detectLapsFromGps = (data) => {
+  const firstGps = data.find((r) => r.Latitude !== 0 && r.Longitude !== 0);
+  if (!firstGps) return data; // no GPS, leave Lap as-is
+
+  const distM = (a, b) => {
+    if (!a || !b) return Infinity;
+    const dLat = (b.Latitude - a.Latitude) * 111320;
+    const dLon = (b.Longitude - a.Longitude) * 111320 * Math.cos(a.Latitude * Math.PI / 180);
+    return Math.hypot(dLat, dLon);
+  };
+
+  const NEAR_M = 30;       // within 30m of origin = "back at start"
+  const FAR_M = 150;       // must have gone at least 150m away first
+  const COOLDOWN_S = 8;    // don't trigger lap completion within 8s of last one
+
+  let currentLap = 0;
+  let maxFromOrigin = 0;
+  let lastLapTime = -1e9;
+
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    if (r.Latitude === 0) {
+      r.Lap = currentLap;
+      continue;
+    }
+    const d = distM(firstGps, r);
+    if (d > maxFromOrigin) maxFromOrigin = d;
+
+    if (d < NEAR_M && maxFromOrigin > FAR_M && (r.RunTime - lastLapTime) > COOLDOWN_S) {
+      currentLap++;
+      maxFromOrigin = 0;
+      lastLapTime = r.RunTime;
+    }
+    r.Lap = currentLap;
+  }
+
+  // Compute LapRunTime within each lap, and LapTime in Drogger semantics
+  // Drogger: LapTime in all rows of lap N+1 = duration of lap N in ms
+  const lapBuckets = new Map();
+  for (const r of data) {
+    if (!lapBuckets.has(r.Lap)) lapBuckets.set(r.Lap, []);
+    lapBuckets.get(r.Lap).push(r);
+  }
+  const sortedLaps = [...lapBuckets.keys()].sort((a, b) => a - b);
+  for (let i = 0; i < sortedLaps.length; i++) {
+    const samples = lapBuckets.get(sortedLaps[i]);
+    samples.sort((a, b) => a.RunTime - b.RunTime);
+    const lapStart = samples[0].RunTime;
+    samples.forEach((r) => { r.LapRunTime = r.RunTime - lapStart; });
+
+    if (i + 1 < sortedLaps.length) {
+      // duration of lap i = first sample of lap i+1 - first sample of lap i
+      const nextSamples = lapBuckets.get(sortedLaps[i + 1]);
+      const dur = nextSamples[0].RunTime - lapStart;
+      // Drogger semantics: lap (i+1)'s LapTime = duration of lap i in ms
+      nextSamples.forEach((r) => { r.LapTime = dur * 1000; });
+    }
+  }
+  return data;
+};
+
+const parseSession = (rawData, name, type, options = {}) => {
+  const { source = "drogger", hasGps = true } = options;
   const lapMap = new Map();
   rawData.forEach((row) => {
     const lap = row.Lap;
@@ -337,6 +533,8 @@ const parseSession = (rawData, name, type) => {
 
   return {
     id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0,
+    source,
+    hasGps: hasGps && rawData.some((r) => r.Latitude !== 0 && r.Longitude !== 0),
     totalSamples: rawData.length,
     hasAfr: rawData.some((r) => r.Afr && r.Afr > 0),
     hasThrottle: rawData.some((r) => r.ThrottolePos && r.ThrottolePos > 0),
@@ -857,6 +1055,16 @@ function DroggerAnalyzer() {
   const fileInputRef = useRef(null);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
+  // Fallback active tab if it requires capabilities the current session lacks
+  useEffect(() => {
+    if (!activeSession) return;
+    if ((activeTab === "track" || activeTab === "compare") && !activeSession.hasGps) {
+      setActiveTab("overview");
+    }
+    if (activeTab === "tuning" && !activeSession.hasAfr) {
+      setActiveTab("overview");
+    }
+  }, [activeSession?.id, activeSession?.hasGps, activeSession?.hasAfr, activeTab]);
   const activeStintMap = activeSession ? (stintAssignments[activeSession.id] || {}) : {};
 
   const handleFiles = useCallback(async (fileList) => {
@@ -865,18 +1073,44 @@ function DroggerAnalyzer() {
     const newSessions = [];
     for (const file of files) {
       try {
-        const text = await readFileAsText(file);
-        const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
-        if (!parsed.data.length || !("Lap" in parsed.data[0])) {
-          setParseError(`${file.name}: Drogger CSVではないようです（Lap列がありません）`);
-          continue;
+        // Warn for very large files (especially aRacer SP smartphone logs which can exceed 100MB)
+        if (file.size > 80 * 1024 * 1024) {
+          console.warn(`Large file: ${file.name} (${(file.size/1024/1024).toFixed(0)}MB) — parsing may take a while`);
         }
+        const text = await readFileAsText(file);
+        const fmt = detectLogFormat(text);
+
         const lc = file.name.toLowerCase();
         const isRace = lc.includes("race") || file.name.includes("本番");
         const isQual = lc.includes("qual") || file.name.includes("予選");
         const type = isRace ? "race" : isQual ? "qualifying" : "practice";
-        const session = parseSession(parsed.data, file.name.replace(/\.csv$/i, ""), type);
-        newSessions.push(session);
+        const baseName = file.name.replace(/\.(csv|loga)$/i, "");
+
+        if (fmt === "drogger") {
+          const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+          if (!parsed.data.length || !("Lap" in parsed.data[0])) {
+            setParseError(`${file.name}: Drogger CSVではないようです（Lap列がありません）`);
+            continue;
+          }
+          const session = parseSession(parsed.data, baseName, type, { source: "drogger", hasGps: true });
+          newSessions.push(session);
+        } else if (fmt === "aracer_sp" || fmt === "aracer_ecu" || fmt === "aracer_lm") {
+          const { data, hasGps } = parseAracerLog(text, fmt);
+          if (!data.length) {
+            setParseError(`${file.name}: aRacer ログのデータが空です`);
+            continue;
+          }
+          // For aRacer LM with valid GPS but empty IR_LapNumber: detect laps from GPS trajectory
+          const allZeroLap = data.every((r) => r.Lap === 0);
+          if (hasGps && allZeroLap) {
+            detectLapsFromGps(data);
+          }
+          const session = parseSession(data, baseName, type, { source: fmt, hasGps });
+          newSessions.push(session);
+        } else {
+          setParseError(`${file.name}: 認識できないログ形式です（Drogger CSV または aRacer .loga が対象）`);
+          continue;
+        }
       } catch (e) { setParseError(`${file.name}: ${e.message}`); }
     }
     if (newSessions.length) {
@@ -1038,7 +1272,7 @@ function DroggerAnalyzer() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <input ref={fileInputRef} type="file" accept=".csv,text/csv,text/plain,application/vnd.ms-excel,application/csv" multiple className="hidden"
+          <input ref={fileInputRef} type="file" accept=".csv,.loga,text/csv,text/plain,application/vnd.ms-excel,application/csv" multiple className="hidden"
             onChange={(e) => { if (e.target.files) handleFiles(e.target.files); }} />
           <button onClick={() => setAboutOpen(true)} className="p-2 text-gray-400 hover:text-yellow-400 active:text-yellow-400 transition" title="About / バージョン情報" style={{ touchAction: "manipulation" }}>
             <Info size={isMobile ? 20 : 18} />
@@ -1184,7 +1418,22 @@ function DroggerAnalyzer() {
               <div className="border-b border-[#252d3a] flex items-center justify-between gap-2" style={{ background: PANEL, padding: isMobile ? "6px 12px" : "8px 16px" }}>
                 <div className="flex items-center gap-2 min-w-0 flex-1">
                   <div className="w-1 h-5 flex-shrink-0" style={{ background: ACCENT }}></div>
-                  <div className="font-mono text-xs text-gray-200 truncate" style={{ maxWidth: isMobile ? "calc(100vw - 200px)" : "28rem" }}>{activeSession.name}</div>
+                  <div className="font-mono text-xs text-gray-200 truncate" style={{ maxWidth: isMobile ? "calc(100vw - 240px)" : "28rem" }}>{activeSession.name}</div>
+                  {(() => {
+                    // Source badge: DRG / SP / ECU / LM
+                    const srcMap = {
+                      drogger:    { label: "DRG", color: "bg-yellow-700/40 text-yellow-300" },
+                      aracer_sp:  { label: "aR-SP", color: "bg-purple-900/50 text-purple-300" },
+                      aracer_ecu: { label: "aR-ECU", color: "bg-purple-900/50 text-purple-300" },
+                      aracer_lm:  { label: "aR-LM", color: "bg-fuchsia-900/50 text-fuchsia-300" },
+                    };
+                    const s = srcMap[activeSession.source] || srcMap.drogger;
+                    return (
+                      <span className={`font-mono text-[9px] px-1.5 py-0.5 flex-shrink-0 ${s.color}`} style={{ borderRadius: 2 }}>
+                        {s.label}
+                      </span>
+                    );
+                  })()}
                   {!isMobile && (
                     <span className={`font-mono text-[9px] px-1.5 py-0.5 ${activeSession.type === "race" ? "bg-red-900/50 text-red-300" : activeSession.type === "qualifying" ? "bg-blue-900/50 text-blue-300" : "bg-gray-700/50 text-gray-300"}`}>
                       {activeSession.type.toUpperCase()}
@@ -1211,8 +1460,10 @@ function DroggerAnalyzer() {
               <div className="border-b border-[#252d3a] flex items-stretch overflow-x-auto" style={{ background: PANEL, paddingLeft: isMobile ? 4 : 12, paddingRight: isMobile ? 4 : 12 }}>
                 {[
                   { id: "overview", label: "Overview", Icon: Activity },
-                  { id: "track", label: "Track", Icon: MapPin },
-                  { id: "compare", label: "Compare", Icon: Layers },
+                  ...(activeSession.hasGps ? [
+                    { id: "track", label: "Track", Icon: MapPin },
+                    { id: "compare", label: "Compare", Icon: Layers },
+                  ] : []),
                   { id: "riders", label: "Riders", Icon: Users },
                   { id: "strategy", label: "Strategy", Icon: Gauge },
                   ...(activeSession.hasAfr ? [{ id: "tuning", label: "Tuning", Icon: Gauge }] : []),
@@ -1835,6 +2086,5 @@ document.getElementById('loader').style.display = 'none';
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<DroggerAnalyzer />);
   </script>
-
 </body>
 </html>

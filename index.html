@@ -118,6 +118,18 @@ const rpmColor = (rpm, engineType = "4st") => {
   return `hsl(${h.toFixed(0)},${s.toFixed(0)}%,${l.toFixed(0)}%)`;
 };
 
+// ─── Cross-browser file text reader (file.text() needs Chrome 76+) ───
+const readFileAsText = (file) => new Promise((resolve, reject) => {
+  if (typeof file.text === "function") {
+    file.text().then(resolve).catch(reject);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error || new Error("FileReader failed"));
+  reader.readAsText(file);
+});
+
 // ─── Find sample at given elapsed seconds since lap start ────────
 // Uses RunTime (absolute session time) to locate the sample. If the
 // requested elapsed exceeds the lap's duration, returns the last sample
@@ -534,7 +546,7 @@ function DroggerAnalyzer() {
     const newSessions = [];
     for (const file of files) {
       try {
-        const text = await file.text();
+        const text = await readFileAsText(file);
         const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
         if (!parsed.data.length || !("Lap" in parsed.data[0])) {
           setParseError(`${file.name}: Drogger CSVではないようです（Lap列がありません）`);
@@ -707,7 +719,7 @@ function DroggerAnalyzer() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <input ref={fileInputRef} type="file" accept=".csv" multiple className="hidden"
+          <input ref={fileInputRef} type="file" accept=".csv,text/csv,text/plain,application/vnd.ms-excel,application/csv" multiple className="hidden"
             onChange={(e) => { if (e.target.files) handleFiles(e.target.files); }} />
           <Btn onClick={() => fileInputRef.current?.click()} primary>
             <Upload size={12} className="inline mr-1.5" />{isMobile ? "CSV" : "CSV Load"}

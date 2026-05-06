@@ -56,17 +56,15 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.5.7";
+const APP_VERSION = "1.5.8";
 const CHANGELOG = [
   {
-    version: "1.5.7",
+    version: "1.5.8",
     date: "2026-05-06",
     notes: [
-      "**重要バグ修正**：DroggerファイルでS/Fを動かしたときラップ情報が破壊される問題を修正",
-      "ソース別の動作に変更：Drogger / aRacer SP / aRacer ECU はマーカー位置のみ移動（ラップ情報は元のまま保持）",
-      "aRacer LM だけは GPS 自前検出のため、S/F移動でラップを再検出",
-      "再検出が失敗した場合（クリック位置がコース外など）は警告を出して変更を捨てる",
-      "DroggerファイルのS/Fマーカーも、ラップ境界の平均位置から自動算出して表示",
+      "S/Fマーカー・編集UIをaRacer LMセッション限定に変更（GPSで自前ラップ検出した時のみ）",
+      "Drogger / aRacer SP / aRacer ECU はS/F関連の表示を一切しない（本体側のラップ検出を尊重）",
+      "「S/Fを動かしたのにラップ範囲は元のまま」という論理的な矛盾を解消",
     ],
   },
   {
@@ -650,33 +648,14 @@ const parseSession = (rawData, name, type, options = {}) => {
   });
   if (cur) stints.push(cur);
 
-  // If lapRef wasn't provided externally (i.e. Drogger CSV with its own Lap field),
-  // derive it from the GPS positions at lap transitions. This gives a visual
-  // marker on the track where the device's own lap counter incremented.
-  let effectiveLapRef = lapRef;
-  if (!effectiveLapRef && hasGps && laps.length > 1) {
-    const transitionPoints = [];
-    for (let i = 1; i < laps.length; i++) {
-      const firstSample = laps[i].samples.find((s) => s.Latitude !== 0 && s.Longitude !== 0);
-      if (firstSample) {
-        transitionPoints.push({ Latitude: firstSample.Latitude, Longitude: firstSample.Longitude });
-      }
-    }
-    if (transitionPoints.length > 0) {
-      let sumLat = 0, sumLon = 0;
-      for (const p of transitionPoints) { sumLat += p.Latitude; sumLon += p.Longitude; }
-      effectiveLapRef = {
-        Latitude: sumLat / transitionPoints.length,
-        Longitude: sumLon / transitionPoints.length,
-      };
-    }
-  }
-
   return {
     id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0,
     source,
     hasGps: hasGps && rawData.some((r) => r.Latitude !== 0 && r.Longitude !== 0),
-    lapRef: effectiveLapRef, // S/F marker — derived from data for Drogger, auto-detected for aRacer
+    // lapRef is ONLY set when GPS-based lap detection was performed (aRacer LM).
+    // For Drogger / aRacer SP / aRacer ECU where lap data comes from the device,
+    // lapRef stays null — so the S/F edit UI is hidden.
+    lapRef,
     totalSamples: rawData.length,
     hasAfr: rawData.some((r) => r.Afr && r.Afr > 0),
     hasThrottle: rawData.some((r) => r.ThrottolePos && r.ThrottolePos > 0),
@@ -1349,42 +1328,28 @@ function DroggerAnalyzer() {
     setSessions((ss) => ss.map((s) => (s.id === id ? { ...s, engineType } : s)));
   };
 
-  // Manually override the lap line for a session (called when user clicks on
-  // Track plot in edit mode). Behavior depends on session source:
-  //   - drogger / aracer_sp / aracer_ecu: Lap field is authoritative from the source.
-  //     Just update the visual S/F marker, do NOT re-detect laps.
-  //   - aracer_lm: lap detection was GPS-based to begin with. Re-detect with
-  //     the new reference. Validate that result has reasonable lap count.
+  // Manually override the lap line (called when user clicks on Track plot
+  // in edit mode). Only enabled for sessions where lap detection was GPS-based
+  // to begin with (aRacer LM) — meaning lapRef exists. For Drogger / aRacer
+  // SP/ECU, the edit UI is hidden, so this is never called for those.
   const handleSetLapLine = useCallback((newLat, newLon) => {
     if (!activeSessionId) return;
     setSessions((ss) => ss.map((s) => {
       if (s.id !== activeSessionId) return s;
       const newRef = { Latitude: newLat, Longitude: newLon };
-
-      if (s.source === "aracer_lm") {
-        // Re-detect laps using GPS-based detection
-        const result = recomputeLapsForSession(s, newRef);
-        // Sanity check: if the new ref produces too few laps (e.g. user clicked
-        // off the racing line), reject and warn the user
-        if (result.laps.length < Math.max(2, s.laps.length * 0.3)) {
-          alert(`クリック位置からはラップが正しく検出できませんでした (${result.laps.length}周のみ検出)。\nコース上のレーシングライン付近をクリックしてください。`);
-          return s; // keep original
-        }
-        return result;
+      const result = recomputeLapsForSession(s, newRef);
+      // Sanity check: if the new ref produces too few laps (e.g. user clicked
+      // off the racing line), reject and warn the user
+      if (result.laps.length < Math.max(2, s.laps.length * 0.3)) {
+        alert(`クリック位置からはラップが正しく検出できませんでした (${result.laps.length}周のみ検出)。\nコース上のレーシングライン付近をクリックしてください。`);
+        return s; // keep original
       }
-
-      // For Drogger and aRacer SP/ECU: just update the visual marker
-      // (lap structure remains untouched)
-      return { ...s, lapRef: newRef };
+      return result;
     }));
-    // Only clear selection if laps may have changed (LM source)
-    const cur = sessions.find((s) => s.id === activeSessionId);
-    if (cur && cur.source === "aracer_lm") {
-      setSelectedLap(null);
-      setCompareLap(null);
-    }
+    setSelectedLap(null);
+    setCompareLap(null);
     setLapLineEditMode(false);
-  }, [activeSessionId, sessions]);
+  }, [activeSessionId]);
 
   const addRider = () => {
     setRiders((rs) => [...rs, { id: newId(), name: `Rider ${rs.length + 1}`, color: RIDER_COLORS[rs.length % RIDER_COLORS.length] }]);
@@ -1806,27 +1771,22 @@ function DroggerAnalyzer() {
 
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (speed)`} accent>
-                        <div className="px-3 py-1.5 border-b border-[#252d3a] flex items-center justify-between gap-2" style={{ background: "#0d121a" }}>
-                          <div className="font-mono text-[10px] uppercase tracking-wider text-gray-500 min-w-0 flex-1">
-                            S/F:
-                            {activeSession.lapRef ? (
+                        {activeSession.lapRef && (
+                          <div className="px-3 py-1.5 border-b border-[#252d3a] flex items-center justify-between gap-2" style={{ background: "#0d121a" }}>
+                            <div className="font-mono text-[10px] uppercase tracking-wider text-gray-500 min-w-0 flex-1">
+                              S/F:
                               <span className="ml-2 text-gray-300">
                                 {activeSession.lapRef.Latitude.toFixed(5)}, {activeSession.lapRef.Longitude.toFixed(5)}
                               </span>
-                            ) : (
-                              <span className="ml-2 text-gray-500">未検出</span>
-                            )}
-                            {activeSession.source !== "aracer_lm" && (
-                              <span className="ml-2 text-gray-500 normal-case tracking-normal">（マーカー位置のみ移動・ラップ情報は{activeSession.source === "drogger" ? "Drogger" : "ECU"}側を保持）</span>
-                            )}
+                            </div>
+                            <button onClick={() => setLapLineEditMode((m) => !m)}
+                              className={`font-mono uppercase tracking-wider transition px-2 py-1 flex-shrink-0 ${lapLineEditMode ? "bg-yellow-400 text-black" : "bg-transparent border border-[#252d3a] text-gray-300 hover:border-yellow-400 hover:text-yellow-400"}`}
+                              style={{ borderRadius: 2, fontSize: 10 }}
+                              title="クリックでスタートフィニッシュラインを手動設定">
+                              {lapLineEditMode ? "× 設定中…" : "✎ S/Fを動かす"}
+                            </button>
                           </div>
-                          <button onClick={() => setLapLineEditMode((m) => !m)}
-                            className={`font-mono uppercase tracking-wider transition px-2 py-1 flex-shrink-0 ${lapLineEditMode ? "bg-yellow-400 text-black" : "bg-transparent border border-[#252d3a] text-gray-300 hover:border-yellow-400 hover:text-yellow-400"}`}
-                            style={{ borderRadius: 2, fontSize: 10 }}
-                            title="クリックでスタートフィニッシュラインを手動設定">
-                            {lapLineEditMode ? "× 設定中…" : "✎ S/Fを動かす"}
-                          </button>
-                        </div>
+                        )}
                         <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="speed" cursorSample={refCursor} lapRef={activeSession.lapRef} lapLineEditMode={lapLineEditMode} onSetLapLine={handleSetLapLine} height={isMobile ? 320 : 380} />
                       </Panel>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (rpm)`} accent>

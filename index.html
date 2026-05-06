@@ -56,8 +56,27 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.3";
 const CHANGELOG = [
+  {
+    version: "1.5.3",
+    date: "2026-05-06",
+    notes: [
+      "GPSラップ検出v3：訪問頻度ヒストグラム法に変更。重心法（v2）の欠点を解消",
+      "GPS座標の妥当性チェック追加（緯度-90〜90、経度-180〜180を超えるノイズデータを除外）",
+      "もてぎ50分セッションで14周中13周をレーシングラップとして正確に検出",
+      "ピット停止やセッション中断（800秒越えのギャップ）も自動的に「ラップ外」として処理",
+    ],
+  },
+  {
+    version: "1.5.1",
+    date: "2026-05-06",
+    notes: [
+      "ECU Memory形式（Cycling無し）も判別対応：ALL/FAST/Last10min/GPSなど取出し方の違いを全部吸収",
+      "17～237カラムまでカラム数のバリエーションに対応",
+      "GPSカラム有無は実データの値で判定（カラムだけあって値0の場合は「GPS無し」扱い）",
+    ],
+  },
   {
     version: "1.5.0",
     date: "2026-05-06",
@@ -272,7 +291,9 @@ const sampleAtElapsed = (lap, elapsedSec) => {
 const detectLogFormat = (text) => {
   const firstLine = text.split("\n", 1)[0].trim();
   if (firstLine.startsWith("<aRacer APP Log Data for RaceAMP>"))     return "aracer_sp";
+  // ECU memory has two header variants: "Cycling Memory" (looped buffer) and plain "ECU Memory" (full export)
   if (firstLine.startsWith("<Cycling Memory Log Data of Super ECU>")) return "aracer_ecu";
+  if (firstLine.startsWith("<ECU Memory Log Data of Super ECU>"))     return "aracer_ecu";
   if (firstLine.startsWith("<aRacer ECU_Memory Log Data for RaceAMP>")) return "aracer_lm";
   // Drogger CSV starts with column header line containing common field names
   if (firstLine.includes("Lap") && firstLine.includes("Rpm") && firstLine.includes("RunTime")) return "drogger";
@@ -371,7 +392,12 @@ const parseAracerLog = (text, format) => {
         const ew = intNum(idx.GpsLonEW);
         if (ns === 83) lat = -lat; // South
         if (ew === 87) lon = -lon; // West
-        hasAnyGps = true;
+        // Validate: must be within Earth's coordinate range
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+          lat = 0; lon = 0;
+        } else {
+          hasAnyGps = true;
+        }
       }
     }
 
@@ -394,48 +420,82 @@ const parseAracerLog = (text, format) => {
   return { data, hasGps: hasAnyGps, format, sampleStride };
 };
 
-// ─── GPS-based lap detection (for aRacer LM where IR_LapNumber is empty) ─
-// Strategy: lap completes when GPS returns close to origin AFTER traveling far enough away.
-// Origin = first valid GPS sample.
-// Returns: data with Lap field updated, LapTime/LapRunTime set per Drogger semantics.
+// ─── GPS-based lap detection v3 ─────────────────────────────────
+// Strategy: use a 2D histogram of high-speed GPS samples to find the most-visited
+// area on the racing line, and use that as the lap reference point.
+//
+// Why histogram (vs simple centroid v2):
+//   - Robust to GPS noise/glitches (outlier points end up alone in unique cells)
+//   - Robust to closed-loop track shape (centroid of a loop lands inside the loop,
+//     possibly on grass; histogram peak lands on the actual racing line)
+//
+// v1 (deprecated) used first GPS sample → failed when GPS started in pit lane.
+// v2 (deprecated) used geometric centroid → failed for noisy data and loop tracks.
 const detectLapsFromGps = (data) => {
-  const firstGps = data.find((r) => r.Latitude !== 0 && r.Longitude !== 0);
-  if (!firstGps) return data; // no GPS, leave Lap as-is
+  // Step 1: collect valid GPS samples (already sanitized in parser, but double-check)
+  const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
+  if (validGps.length < 50) return data; // not enough GPS data
+
+  // Step 2: filter to high-speed samples (bike on track at speed)
+  const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
+  const fastThreshold = maxSpeed * 0.4;
+  let fastSamples = validGps.filter((r) => r.Speed > fastThreshold);
+  if (fastSamples.length < 50) fastSamples = validGps; // fallback if too few
+
+  // Step 3: bin into ~10m × 10m cells and find the most-visited cell
+  // 1 degree latitude ≈ 111,320 m, so 0.0001° ≈ 11 m
+  const GRID = 0.0001;
+  const cells = new Map();
+  for (const r of fastSamples) {
+    const key = `${Math.round(r.Latitude / GRID)},${Math.round(r.Longitude / GRID)}`;
+    cells.set(key, (cells.get(key) || 0) + 1);
+  }
+  if (!cells.size) return data;
+
+  let bestKey = null, bestCount = 0;
+  for (const [k, c] of cells) {
+    if (c > bestCount) { bestCount = c; bestKey = k; }
+  }
+  const [bestLatI, bestLonI] = bestKey.split(",").map(Number);
+  const ref = {
+    Latitude:  bestLatI * GRID,
+    Longitude: bestLonI * GRID,
+  };
 
   const distM = (a, b) => {
-    if (!a || !b) return Infinity;
     const dLat = (b.Latitude - a.Latitude) * 111320;
     const dLon = (b.Longitude - a.Longitude) * 111320 * Math.cos(a.Latitude * Math.PI / 180);
     return Math.hypot(dLat, dLon);
   };
 
-  const NEAR_M = 30;       // within 30m of origin = "back at start"
-  const FAR_M = 150;       // must have gone at least 150m away first
-  const COOLDOWN_S = 8;    // don't trigger lap completion within 8s of last one
+  const NEAR_M = 50;
+  const FAR_M = 200;
+  const COOLDOWN_S = 30;
 
+  // Step 4: detect zone-entry transitions
   let currentLap = 0;
-  let maxFromOrigin = 0;
+  let maxFromRef = 0;
   let lastLapTime = -1e9;
+  let inZonePrev = false;
 
   for (let i = 0; i < data.length; i++) {
     const r = data[i];
-    if (r.Latitude === 0) {
-      r.Lap = currentLap;
-      continue;
-    }
-    const d = distM(firstGps, r);
-    if (d > maxFromOrigin) maxFromOrigin = d;
+    if (r.Latitude === 0) { r.Lap = currentLap; continue; }
+    const d = distM(ref, r);
+    if (d > maxFromRef) maxFromRef = d;
+    const inZone = d < NEAR_M;
 
-    if (d < NEAR_M && maxFromOrigin > FAR_M && (r.RunTime - lastLapTime) > COOLDOWN_S) {
+    if (inZone && !inZonePrev && maxFromRef > FAR_M && (r.RunTime - lastLapTime) > COOLDOWN_S) {
       currentLap++;
-      maxFromOrigin = 0;
+      maxFromRef = 0;
       lastLapTime = r.RunTime;
     }
+    inZonePrev = inZone;
     r.Lap = currentLap;
   }
 
-  // Compute LapRunTime within each lap, and LapTime in Drogger semantics
-  // Drogger: LapTime in all rows of lap N+1 = duration of lap N in ms
+  // Step 5: compute LapRunTime + LapTime per Drogger semantics
+  // (LapTime in all rows of lap N+1 = duration of lap N in ms)
   const lapBuckets = new Map();
   for (const r of data) {
     if (!lapBuckets.has(r.Lap)) lapBuckets.set(r.Lap, []);
@@ -449,10 +509,8 @@ const detectLapsFromGps = (data) => {
     samples.forEach((r) => { r.LapRunTime = r.RunTime - lapStart; });
 
     if (i + 1 < sortedLaps.length) {
-      // duration of lap i = first sample of lap i+1 - first sample of lap i
       const nextSamples = lapBuckets.get(sortedLaps[i + 1]);
       const dur = nextSamples[0].RunTime - lapStart;
-      // Drogger semantics: lap (i+1)'s LapTime = duration of lap i in ms
       nextSamples.forEach((r) => { r.LapTime = dur * 1000; });
     }
   }

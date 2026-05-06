@@ -239,16 +239,21 @@ const parseSession = (rawData, name, type) => {
   const lat0 = validGps.length ? validGps.reduce((a, r) => a + r.Latitude, 0) / validGps.length : 0;
   const lon0 = validGps.length ? validGps.reduce((a, r) => a + r.Longitude, 0) / validGps.length : 0;
 
-  const racingDurations = laps.filter((l) => l.duration > 60 && l.duration < 200).map((l) => l.duration);
-  const medianDur = racingDurations.length
-    ? racingDurations.sort((a, b) => a - b)[Math.floor(racingDurations.length / 2)] : 0;
-  const stintBreakThresh = medianDur > 0 ? medianDur * 1.7 : 200;
+  // Auto-adaptive racing-lap detection: use median lap time of "plausible"
+  // laps (10-600s absolute bounds), then keep laps within 0.55x..1.7x of median.
+  // This adapts to short kart courses (~40s) and longer circuits (~110s) alike.
+  const plausibleDurations = laps.map((l) => l.duration).filter((d) => d > 10 && d < 600);
+  const medianDur = plausibleDurations.length
+    ? [...plausibleDurations].sort((a, b) => a - b)[Math.floor(plausibleDurations.length / 2)]
+    : 0;
+  const racingMin = medianDur > 0 ? medianDur * 0.55 : 10;
+  const racingMax = medianDur > 0 ? medianDur * 1.7 : 600;
+  laps.forEach((l) => { l.isRacing = l.duration >= racingMin && l.duration <= racingMax; });
 
   let stints = [];
   let cur = null;
   laps.forEach((lap) => {
-    const isBreak = lap.duration > stintBreakThresh || lap.duration < 30;
-    if (isBreak) {
+    if (!lap.isRacing) {
       if (cur) { stints.push(cur); cur = null; }
       return;
     }
@@ -498,7 +503,7 @@ const TracePlot = ({ lapA, lapB, mode = "speed", height = 280, label }) => {
 const LapTimesChart = ({ session, lookupRiderForLap, onLapClick, selectedLap, height = 320 }) => {
   if (!session) return null;
   const w = 800, h = height, pad = { l: 60, r: 20, t: 20, b: 40 };
-  const racing = session.laps.filter((l) => l.duration > 60 && l.duration < 200);
+  const racing = session.laps.filter((l) => l.isRacing);
   if (!racing.length) return <div className="text-gray-500 p-6 text-center text-sm font-mono">レーシングラップが検出できません</div>;
   const tMax = Math.max(...racing.map((l) => l.duration)) * 1.05;
   const tMin = Math.min(...racing.map((l) => l.duration)) * 0.95;
@@ -550,7 +555,7 @@ const LapTimesChart = ({ session, lookupRiderForLap, onLapClick, selectedLap, he
 const PaceEvolution = ({ session, height = 200 }) => {
   if (!session) return null;
   const w = 800, h = height, pad = { l: 60, r: 20, t: 20, b: 30 };
-  const racing = session.laps.filter((l) => l.duration > 60 && l.duration < 200);
+  const racing = session.laps.filter((l) => l.isRacing);
   if (racing.length < 3) return null;
   const tMax = Math.max(...racing.map((l) => l.duration)) * 1.05;
   const tMin = Math.min(...racing.map((l) => l.duration)) * 0.95;
@@ -695,7 +700,7 @@ function DroggerAnalyzer() {
     return riders.map((r) => {
       const myStintIds = Object.keys(activeStintMap).filter((sid) => activeStintMap[sid] === r.id);
       const myStints = activeSession.stints.filter((st) => myStintIds.includes(st.id));
-      const allLaps = myStints.flatMap((st) => st.laps).filter((l) => l.duration > 60 && l.duration < 200);
+      const allLaps = myStints.flatMap((st) => st.laps).filter((l) => l.isRacing);
       if (!allLaps.length) return { ...r, lapCount: 0, stintCount: myStints.length };
       const durations = allLaps.map((l) => l.duration).sort((a, b) => a - b);
       return { ...r, lapCount: allLaps.length, stintCount: myStints.length,
@@ -707,7 +712,7 @@ function DroggerAnalyzer() {
 
   const theoreticalBest = useMemo(() => {
     if (!activeSession) return null;
-    const racing = activeSession.laps.filter((l) => l.duration > 60 && l.duration < 200);
+    const racing = activeSession.laps.filter((l) => l.isRacing);
     if (racing.length < 2) return null;
     const N = 6;
     const sectorBest = new Array(N).fill(Infinity);
@@ -982,7 +987,7 @@ function DroggerAnalyzer() {
                 {activeTab === "overview" && (<>
                   <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-6"}`}>
                     {(() => {
-                      const racing = activeSession.laps.filter((l) => l.duration > 60 && l.duration < 200);
+                      const racing = activeSession.laps.filter((l) => l.isRacing);
                       const best = racing.length ? Math.min(...racing.map((l) => l.duration)) : null;
                       const avg = racing.length ? racing.reduce((a, l) => a + l.duration, 0) / racing.length : null;
                       const maxRpm = Math.max(...activeSession.laps.map((l) => l.maxRpm));
@@ -1008,7 +1013,7 @@ function DroggerAnalyzer() {
                 {activeTab === "track" && (<>
                   <Panel title="Lap Selection" accent>
                     <div className={`p-3 flex flex-wrap gap-1.5 overflow-y-auto ${isMobile ? "max-h-40" : "max-h-32"}`}>
-                      {activeSession.laps.filter((l) => l.duration > 60 && l.duration < 200).map((l) => {
+                      {activeSession.laps.filter((l) => l.isRacing).map((l) => {
                         const r = lookupRiderForLap(l.lap);
                         return (
                           <button key={l.lap} onClick={() => setSelectedLap(l.lap)}
@@ -1088,7 +1093,7 @@ function DroggerAnalyzer() {
                   <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
                     <Panel title="Reference Lap (yellow)" accent>
                       <div className="p-3 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
-                        {activeSession.laps.filter((l) => l.duration > 60 && l.duration < 200).map((l) => {
+                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
                           const r = lookupRiderForLap(l.lap);
                           return (
                             <button key={l.lap} onClick={() => setSelectedLap(l.lap)}
@@ -1103,7 +1108,7 @@ function DroggerAnalyzer() {
                     </Panel>
                     <Panel title="Compare Lap (cyan)" accent>
                       <div className="p-3 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
-                        {activeSession.laps.filter((l) => l.duration > 60 && l.duration < 200).map((l) => {
+                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
                           const r = lookupRiderForLap(l.lap);
                           return (
                             <button key={l.lap} onClick={() => setCompareLap(l.lap)}
@@ -1278,7 +1283,7 @@ function DroggerAnalyzer() {
                         </thead>
                         <tbody>
                           {(() => {
-                            const racing = activeSession.laps.filter((l) => l.duration > 60 && l.duration < 200);
+                            const racing = activeSession.laps.filter((l) => l.isRacing);
                             const best = racing.length ? Math.min(...racing.map((l) => l.duration)) : 0;
                             return racing.map((lap) => {
                               const r = lookupRiderForLap(lap.lap);
@@ -1328,7 +1333,7 @@ function DroggerAnalyzer() {
                   const totalSamples = allSamples.length;
 
                   const lapWOT = activeSession.laps
-                    .filter((l) => l.duration > 60 && l.duration < 200)
+                    .filter((l) => l.isRacing)
                     .map((l) => {
                       const wot = l.samples.filter((s) => s.ThrottolePos > 60 && s.Afr >= AFR_MIN);
                       const avg = wot.length ? wot.reduce((a, s) => a + s.Afr, 0) / wot.length : null;

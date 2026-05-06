@@ -56,24 +56,24 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.5.4";
+const APP_VERSION = "1.5.5";
 const CHANGELOG = [
   {
-    version: "1.5.4",
+    version: "1.5.5",
     date: "2026-05-06",
     notes: [
-      "GPSラップ検出v4：高速度サンプル（最高速の70%以上）に絞ってヒストグラムを取ることで、ストレート上に起点を配置するよう改善",
-      "v3はバイクの滞在時間が長い低速コーナーが選ばれてしまう問題があった（東ピット直前のヘアピンなど）",
-      "Track / Compareタブにスタートフィニッシュ（S/F）マーカーを表示。検出半径50mも併せて点線で表示",
+      "GPSラップ検出v8：ピット出口検出をベースに変更。ピットアウト後に100km/hに達する位置（ホームストレート上）を起点とすることで、フィニッシュライン付近に正しく配置",
+      "v4はバックストレート（最高速地点）を起点にしてしまう問題があった。サーキットの最高速ポイントとフィニッシュラインは別物",
+      "ピットアウト検出に失敗した場合（10分間バッファのような部分セッション）は v4 ヒストグラム法にフォールバック",
+      "Track / Compareタブで、検出半径50mと共にスタートフィニッシュ（S/F）マーカーを表示",
     ],
   },
   {
     version: "1.5.3",
     date: "2026-05-06",
     notes: [
-      "GPSラップ検出v3：訪問頻度ヒストグラム法に変更。重心法（v2）の欠点を解消",
+      "GPSラップ検出：訪問頻度ヒストグラム法に変更",
       "GPS座標の妥当性チェック追加（緯度-90〜90、経度-180〜180を超えるノイズデータを除外）",
-      "もてぎ50分セッションで14周中13周をレーシングラップとして正確に検出",
       "ピット停止やセッション中断（800秒越えのギャップ）も自動的に「ラップ外」として処理",
     ],
   },
@@ -429,54 +429,94 @@ const parseAracerLog = (text, format) => {
   return { data, hasGps: hasAnyGps, format, sampleStride };
 };
 
-// ─── GPS-based lap detection v4 ─────────────────────────────────
-// Strategy: of all GPS samples in the top 70% speed range (i.e., on a fast
-// straight), find the cell most frequently visited. This biases toward the
-// longest, fastest straight on the track — which is where the lap reference
-// line should naturally be placed.
+// ─── GPS-based lap detection v8 ─────────────────────────────────
+// Strategy: detect the bike's position when it FIRST reaches racing speed
+// (>100 km/h smoothed) after a slow phase (<30 km/h). This is the bike fully
+// merged onto the racing line near the pit exit — i.e. on the homestraight
+// near where the finish line typically is.
 //
-// Why high speed threshold (vs all fast samples in v3):
-//   - At 40% threshold, slow corners stay in the pool. Bike spends MORE TIME
-//     in slow corners (more samples per meter), so corners win the histogram.
-//   - At 70%+ threshold, only actual straights remain. The longest straight
-//     wins by sample count.
+// For sessions with multiple stints (pit-in, then pit-out again), the average
+// of all such pit-out events gives a very stable racing-line point.
 //
-// The detected reference point is exposed as session.lapRef so the UI can
-// display it as a marker on the Track tab.
+// Fallback: if no pit-out detected (e.g. file starts mid-track for a partial
+// session like a "last 10 min" buffer), fall back to v4-style histogram of
+// fast samples.
+//
+// History:
+//   v1 = first GPS sample (failed for sessions starting in pit)
+//   v2 = centroid of fast samples (broken by GPS noise)
+//   v3 = histogram of fast samples (picked low-speed corners due to dwell time)
+//   v4 = histogram of top-70%-speed samples (picked back straight max-speed area)
+//   v5/v6/v7 = pit transition detection at various thresholds
+//   v8 = pit-out at 100km/h + v4 fallback (current)
 const detectLapsFromGps = (data) => {
   const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
   if (validGps.length < 50) return null;
 
-  const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
-  // Tier 1: top 70% speed (fast straights only)
-  let threshold = maxSpeed * 0.7;
-  let fastSamples = validGps.filter((r) => r.Speed > threshold);
-  // Tier 2: fall back to top 50% if too few samples (short session, low max speed)
-  if (fastSamples.length < 20) {
-    threshold = maxSpeed * 0.5;
-    fastSamples = validGps.filter((r) => r.Speed > threshold);
+  // === Strategy 1: pit-out detection at 100 km/h threshold ===
+  // Bike is fully on racing line at this speed (pit lane speed limit is ~50 km/h)
+  const SLOW_T = 30, FAST_T = 100, WIN = 5;
+  // Smooth speed with a small moving window to avoid noise triggers
+  const smoothSpeed = new Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    let sum = 0, n = 0;
+    for (let j = Math.max(0, i - Math.floor(WIN / 2)); j <= Math.min(data.length - 1, i + Math.floor(WIN / 2)); j++) {
+      sum += data[j].Speed; n++;
+    }
+    smoothSpeed[i] = sum / n;
   }
-  // Tier 3: fall back to all valid GPS if still too few
-  if (fastSamples.length < 20) fastSamples = validGps;
 
-  // Bin into ~10m × 10m cells (1° lat ≈ 111,320 m, so 0.0001° ≈ 11 m)
-  const GRID = 0.0001;
-  const cells = new Map();
-  for (const r of fastSamples) {
-    const key = `${Math.round(r.Latitude / GRID)},${Math.round(r.Longitude / GRID)}`;
-    cells.set(key, (cells.get(key) || 0) + 1);
+  const pitOuts = [];
+  let state = "unknown"; // unknown / slow / fast
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    if (r.Latitude === 0) continue;
+    const s = smoothSpeed[i];
+    if (state === "unknown") {
+      if (s < SLOW_T) state = "slow";
+      else if (s > FAST_T) state = "fast";
+    } else if (state === "slow" && s > FAST_T) {
+      pitOuts.push({ Latitude: r.Latitude, Longitude: r.Longitude });
+      state = "fast";
+    } else if (state === "fast" && s < SLOW_T) {
+      state = "slow";
+    }
   }
-  if (!cells.size) return null;
 
-  let bestKey = null, bestCount = 0;
-  for (const [k, c] of cells) {
-    if (c > bestCount) { bestCount = c; bestKey = k; }
+  let ref = null;
+  if (pitOuts.length > 0) {
+    // Average all pit-out positions (typically at the same physical merge point)
+    let sumLat = 0, sumLon = 0;
+    for (const p of pitOuts) { sumLat += p.Latitude; sumLon += p.Longitude; }
+    ref = { Latitude: sumLat / pitOuts.length, Longitude: sumLon / pitOuts.length };
+  } else {
+    // === Strategy 2 (fallback): histogram of top-70%-speed samples ===
+    // Used when file is a partial session that starts mid-track
+    // (bike already racing, no pit-out transition in data).
+    const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
+    let threshold = maxSpeed * 0.7;
+    let fastSamples = validGps.filter((r) => r.Speed > threshold);
+    if (fastSamples.length < 20) {
+      threshold = maxSpeed * 0.5;
+      fastSamples = validGps.filter((r) => r.Speed > threshold);
+    }
+    if (fastSamples.length < 20) fastSamples = validGps;
+
+    const GRID = 0.0001;
+    const cells = new Map();
+    for (const r of fastSamples) {
+      const key = `${Math.round(r.Latitude / GRID)},${Math.round(r.Longitude / GRID)}`;
+      cells.set(key, (cells.get(key) || 0) + 1);
+    }
+    if (!cells.size) return null;
+
+    let bestKey = null, bestCount = 0;
+    for (const [k, c] of cells) {
+      if (c > bestCount) { bestCount = c; bestKey = k; }
+    }
+    const [bestLatI, bestLonI] = bestKey.split(",").map(Number);
+    ref = { Latitude: bestLatI * GRID, Longitude: bestLonI * GRID };
   }
-  const [bestLatI, bestLonI] = bestKey.split(",").map(Number);
-  const ref = {
-    Latitude:  bestLatI * GRID,
-    Longitude: bestLonI * GRID,
-  };
 
   const distM = (a, b) => {
     const dLat = (b.Latitude - a.Latitude) * 111320;
@@ -528,7 +568,7 @@ const detectLapsFromGps = (data) => {
       nextSamples.forEach((r) => { r.LapTime = dur * 1000; });
     }
   }
-  return ref; // expose chosen reference point for UI display
+  return ref;
 };
 
 const parseSession = (rawData, name, type, options = {}) => {

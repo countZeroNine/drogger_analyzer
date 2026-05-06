@@ -24,6 +24,14 @@
 
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
+  <!-- Vercel Analytics (anonymous page view tracking) -->
+
+  <script>
+    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+  </script>
+
+  <script defer src="/_vercel/insights/script.js"></script>
+
   <style>
     html, body { margin: 0; padding: 0; background: #0a0e14; }
     ::-webkit-scrollbar { width: 8px; height: 8px; }
@@ -56,6 +64,53 @@ const PANEL_2 = "#1a212c";
 const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
+// ─── App version & changelog ─────────────────────────────────────
+const APP_VERSION = "1.3.0";
+const CHANGELOG = [
+  {
+    version: "1.3.0",
+    date: "2026-05-06",
+    notes: [
+      "Track上のスピード/RPMトレースに再生位置カーソルを追加",
+      "ラップ判定をコース別に自動適応（短いカートコースから長い本格コースまで対応）",
+      "About / バージョン履歴パネルを追加",
+      "Vercel Analyticsで匿名ページビュー集計を開始",
+    ],
+  },
+  {
+    version: "1.2.0",
+    date: "2026-05-06",
+    notes: [
+      "A/F (空燃比) のフルレンジ可視化機能を追加",
+      "Track タブに A/F カラーマップを追加",
+      "Tuning タブを新設（ヒストグラム・RPM×AFR散布図・ラップ毎WOT平均推移）",
+      "再生コントロールに A/F 数値表示を追加",
+    ],
+  },
+  {
+    version: "1.1.0",
+    date: "2026-05-04",
+    notes: [
+      "スマホ・タブレット向けレスポンシブレイアウト対応",
+      "古いAndroid環境向けにファイル選択互換性を強化",
+      "Compareモードの両ラップ同時アニメーションを実時間ベースに修正",
+      "ラップタイム計算を Drogger CSV の正しい仕様に修正",
+    ],
+  },
+  {
+    version: "1.0.0",
+    date: "2026-05-04",
+    notes: [
+      "初版リリース",
+      "Track / Compare / Riders / Strategy タブ実装",
+      "GPSトラック上のSpeed/RPMカラーマッピング",
+      "再生アニメーション機能",
+      "ライダー・スティント割当て機能",
+      "エンジン形式（2st/4st）切替によるRPMカラー固定スケール",
+    ],
+  },
+];
+
 // ─── Inline SVG icon factory (replaces lucide-react) ─────────────
 const makeIcon = (children) => ({ size = 14, className = "", style = {} }) => (
   <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none"
@@ -80,6 +135,8 @@ const Play = makeIcon(<polygon points="6 3 20 12 6 21 6 3"/>);
 const Pause = makeIcon(<><rect x="14" y="4" width="4" height="16" rx="0.5"/><rect x="6" y="4" width="4" height="16" rx="0.5"/></>);
 const RotateCcw = makeIcon(<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>);
 const Menu = makeIcon(<><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></>);
+const Info = makeIcon(<><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="16" y2="12"/><line x1="12" x2="12.01" y1="8" y2="8"/></>);
+const Github = makeIcon(<path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>);
 
 // ─── Helpers ─────────────────────────────────────────────────────
 const fmtTime = (s) => {
@@ -646,6 +703,7 @@ function DroggerAnalyzer() {
   // Mobile responsive
   const isMobile = useIsMobile();
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
   const fileInputRef = useRef(null);
 
   const activeSession = sessions.find((s) => s.id === activeSessionId);
@@ -825,13 +883,16 @@ function DroggerAnalyzer() {
           <div className="min-w-0">
             <div className="font-mono text-sm tracking-[0.2em] uppercase truncate">{isMobile ? "DROGGER" : "Drogger // Telemetry"}</div>
             {!isMobile && (
-              <div className="font-mono text-[9px] tracking-wider text-gray-500 uppercase">Endurance Analyzer v1.1 · Standalone</div>
+              <div className="font-mono text-[9px] tracking-wider text-gray-500 uppercase">Endurance Analyzer v{APP_VERSION}</div>
             )}
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <input ref={fileInputRef} type="file" accept=".csv,text/csv,text/plain,application/vnd.ms-excel,application/csv" multiple className="hidden"
             onChange={(e) => { if (e.target.files) handleFiles(e.target.files); }} />
+          <button onClick={() => setAboutOpen(true)} className="p-2 text-gray-400 hover:text-yellow-400 active:text-yellow-400 transition" title="About / バージョン情報" style={{ touchAction: "manipulation" }}>
+            <Info size={isMobile ? 20 : 18} />
+          </button>
           <Btn onClick={() => fileInputRef.current?.click()} primary>
             <Upload size={12} className="inline mr-1.5" />{isMobile ? "CSV" : "CSV Load"}
           </Btn>
@@ -1531,6 +1592,75 @@ function DroggerAnalyzer() {
           )}
         </div>
       </div>
+
+      {/* About modal */}
+      {aboutOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 p-4" onClick={() => setAboutOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="border border-[#252d3a] flex flex-col"
+            style={{ background: PANEL, borderRadius: 2, maxWidth: 520, width: "100%", maxHeight: "85vh" }}>
+            <div className="px-4 py-3 border-b border-[#252d3a] flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-1 h-5" style={{ background: ACCENT }}></div>
+                <div>
+                  <div className="font-mono text-sm tracking-[0.2em] uppercase">Drogger // Telemetry</div>
+                  <div className="font-mono text-[9px] tracking-wider text-gray-500 uppercase">Endurance Analyzer · v{APP_VERSION}</div>
+                </div>
+              </div>
+              <button onClick={() => setAboutOpen(false)} className="p-2 -mr-2 text-gray-400 active:text-yellow-400 hover:text-yellow-400">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 space-y-4">
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1">About</div>
+                <p className="font-mono text-xs text-gray-300 leading-relaxed">
+                  Drogger（BizStation）GPSロガーのCSVデータを可視化・分析するツールです。
+                  ミニバイク・カート耐久レースでの活用を想定して作られました。
+                  ラップ解析、ライン比較、A/F燃調モニタリング、ライダー別集計などができます。
+                </p>
+              </section>
+
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1">プライバシー</div>
+                <p className="font-mono text-xs text-gray-300 leading-relaxed">
+                  読み込んだCSVデータはお使いのブラウザ内でのみ処理され、外部のサーバーには送信されません。
+                  ライダー名・スティント割当てなどもブラウザ内に留まり、ページを閉じると消えます。
+                </p>
+                <p className="font-mono text-xs text-gray-300 leading-relaxed mt-2">
+                  匿名のページビュー集計（Vercel Analytics）のみ利用しています。個人を特定できる情報は収集していません。
+                </p>
+              </section>
+
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">変更履歴</div>
+                <div className="space-y-3">
+                  {CHANGELOG.map((entry) => (
+                    <div key={entry.version} className="border-l-2 pl-3" style={{ borderColor: entry.version === APP_VERSION ? ACCENT : STROKE }}>
+                      <div className="font-mono text-xs flex items-baseline gap-2">
+                        <span className={entry.version === APP_VERSION ? "text-yellow-400" : "text-gray-200"}>v{entry.version}</span>
+                        <span className="text-gray-500 text-[10px]">{entry.date}</span>
+                      </div>
+                      <ul className="font-mono text-[11px] text-gray-400 mt-1 space-y-0.5">
+                        {entry.notes.map((n, i) => (
+                          <li key={i} className="flex gap-1.5"><span className="text-gray-600">·</span><span>{n}</span></li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1">ソース</div>
+                <a href="https://github.com/countZeroNine/drogger_analyzer" target="_blank" rel="noopener noreferrer"
+                  className="font-mono text-xs text-cyan-400 hover:text-yellow-400 inline-flex items-center gap-1.5">
+                  <Github size={11} /> github.com/countZeroNine/drogger_analyzer
+                </a>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

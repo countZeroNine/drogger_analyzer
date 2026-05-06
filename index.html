@@ -56,16 +56,17 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.5.5";
+const APP_VERSION = "1.5.6";
 const CHANGELOG = [
   {
-    version: "1.5.5",
+    version: "1.5.6",
     date: "2026-05-06",
     notes: [
-      "GPSラップ検出v8：ピット出口検出をベースに変更。ピットアウト後に100km/hに達する位置（ホームストレート上）を起点とすることで、フィニッシュライン付近に正しく配置",
-      "v4はバックストレート（最高速地点）を起点にしてしまう問題があった。サーキットの最高速ポイントとフィニッシュラインは別物",
-      "ピットアウト検出に失敗した場合（10分間バッファのような部分セッション）は v4 ヒストグラム法にフォールバック",
-      "Track / Compareタブで、検出半径50mと共にスタートフィニッシュ（S/F）マーカーを表示",
+      "GPSラップ検出v9：閾値を40km/hに変更（実測スイープでもてぎフィニッシュラインから15-30m以内の精度）",
+      "100km/hなど高い閾値だとターン2立ち上がりまで進んでしまう。40km/hがピット速度制限を抜けた直後で最適",
+      "ミニサーキット対応：絶対値40km/hなのでバイクが100km/hに届かないコースでも機能",
+      "**手動オーバーライド機能**：Trackタブで「✎ S/Fを動かす」ボタン → コース上をクリックで起点を任意位置に設定",
+      "GoogleMapsで正確なフィニッシュ位置を確認したらそのままクリックで反映できる",
     ],
   },
   {
@@ -429,34 +430,30 @@ const parseAracerLog = (text, format) => {
   return { data, hasGps: hasAnyGps, format, sampleStride };
 };
 
-// ─── GPS-based lap detection v8 ─────────────────────────────────
-// Strategy: detect the bike's position when it FIRST reaches racing speed
-// (>100 km/h smoothed) after a slow phase (<30 km/h). This is the bike fully
-// merged onto the racing line near the pit exit — i.e. on the homestraight
-// near where the finish line typically is.
+// ─── GPS-based lap detection v9 ─────────────────────────────────
+// Strategy: detect bike's position when speed first crosses 40 km/h after a
+// slow phase. 40 km/h is empirically optimal — high enough that the bike has
+// rolled out of pit garage and is moving with intent, low enough that the
+// crossing happens AT or VERY NEAR the homestraight (not after the bike has
+// already gone through Turn 1/2 and started accelerating on the next straight).
 //
-// For sessions with multiple stints (pit-in, then pit-out again), the average
-// of all such pit-out events gives a very stable racing-line point.
-//
-// Fallback: if no pit-out detected (e.g. file starts mid-track for a partial
-// session like a "last 10 min" buffer), fall back to v4-style histogram of
-// fast samples.
+// Validated against Google-Maps-confirmed finish line on もてぎ本コース:
+//   3 different sessions detected within 15-27m of the actual S/F line.
 //
 // History:
-//   v1 = first GPS sample (failed for sessions starting in pit)
-//   v2 = centroid of fast samples (broken by GPS noise)
-//   v3 = histogram of fast samples (picked low-speed corners due to dwell time)
-//   v4 = histogram of top-70%-speed samples (picked back straight max-speed area)
-//   v5/v6/v7 = pit transition detection at various thresholds
-//   v8 = pit-out at 100km/h + v4 fallback (current)
+//   v1-v3 = first sample / centroid / histogram (various failure modes)
+//   v4 = top-70% histogram → picks max-speed area on back straight (wrong)
+//   v8 = pit-out at 100 km/h → bike has already cleared Turn 1/2 (wrong)
+//   v9 = pit-out at 40 km/h → lands within ~25m of actual finish line (current)
+//
+// Manual override: the user can click on the Track plot to override the
+// detected position (handled in App component, calls recomputeLapsWithRef).
 const detectLapsFromGps = (data) => {
   const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
   if (validGps.length < 50) return null;
 
-  // === Strategy 1: pit-out detection at 100 km/h threshold ===
-  // Bike is fully on racing line at this speed (pit lane speed limit is ~50 km/h)
-  const SLOW_T = 30, FAST_T = 100, WIN = 5;
-  // Smooth speed with a small moving window to avoid noise triggers
+  // Detect FIRST slow→fast transition. Position at that moment = pit exit area.
+  const SLOW_T = 20, FAST_T = 40, WIN = 5;
   const smoothSpeed = new Array(data.length);
   for (let i = 0; i < data.length; i++) {
     let sum = 0, n = 0;
@@ -467,7 +464,7 @@ const detectLapsFromGps = (data) => {
   }
 
   const pitOuts = [];
-  let state = "unknown"; // unknown / slow / fast
+  let state = "unknown";
   for (let i = 0; i < data.length; i++) {
     const r = data[i];
     if (r.Latitude === 0) continue;
@@ -485,14 +482,13 @@ const detectLapsFromGps = (data) => {
 
   let ref = null;
   if (pitOuts.length > 0) {
-    // Average all pit-out positions (typically at the same physical merge point)
     let sumLat = 0, sumLon = 0;
     for (const p of pitOuts) { sumLat += p.Latitude; sumLon += p.Longitude; }
     ref = { Latitude: sumLat / pitOuts.length, Longitude: sumLon / pitOuts.length };
   } else {
-    // === Strategy 2 (fallback): histogram of top-70%-speed samples ===
-    // Used when file is a partial session that starts mid-track
-    // (bike already racing, no pit-out transition in data).
+    // Fallback for partial-session files (e.g. cyclic-buffer "last 10 min" exports)
+    // that start mid-track and never include a pit-out transition.
+    // Use histogram of top-70% speed samples — biased to fast straights.
     const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
     let threshold = maxSpeed * 0.7;
     let fastSamples = validGps.filter((r) => r.Speed > threshold);
@@ -501,7 +497,6 @@ const detectLapsFromGps = (data) => {
       fastSamples = validGps.filter((r) => r.Speed > threshold);
     }
     if (fastSamples.length < 20) fastSamples = validGps;
-
     const GRID = 0.0001;
     const cells = new Map();
     for (const r of fastSamples) {
@@ -509,7 +504,6 @@ const detectLapsFromGps = (data) => {
       cells.set(key, (cells.get(key) || 0) + 1);
     }
     if (!cells.size) return null;
-
     let bestKey = null, bestCount = 0;
     for (const [k, c] of cells) {
       if (c > bestCount) { bestCount = c; bestKey = k; }
@@ -518,12 +512,19 @@ const detectLapsFromGps = (data) => {
     ref = { Latitude: bestLatI * GRID, Longitude: bestLonI * GRID };
   }
 
+  // Run zone-entry lap detection with the chosen reference
+  applyLapsFromGpsRef(data, ref);
+  return ref;
+};
+
+// ─── Lap detection logic, separated so it can be re-run on user override ───
+const applyLapsFromGpsRef = (data, ref) => {
+  if (!ref) return;
   const distM = (a, b) => {
     const dLat = (b.Latitude - a.Latitude) * 111320;
     const dLon = (b.Longitude - a.Longitude) * 111320 * Math.cos(a.Latitude * Math.PI / 180);
     return Math.hypot(dLat, dLon);
   };
-
   const NEAR_M = 50;
   const FAR_M = 200;
   const COOLDOWN_S = 30;
@@ -539,7 +540,6 @@ const detectLapsFromGps = (data) => {
     const d = distM(ref, r);
     if (d > maxFromRef) maxFromRef = d;
     const inZone = d < NEAR_M;
-
     if (inZone && !inZonePrev && maxFromRef > FAR_M && (r.RunTime - lastLapTime) > COOLDOWN_S) {
       currentLap++;
       maxFromRef = 0;
@@ -561,14 +561,12 @@ const detectLapsFromGps = (data) => {
     samples.sort((a, b) => a.RunTime - b.RunTime);
     const lapStart = samples[0].RunTime;
     samples.forEach((r) => { r.LapRunTime = r.RunTime - lapStart; });
-
     if (i + 1 < sortedLaps.length) {
       const nextSamples = lapBuckets.get(sortedLaps[i + 1]);
       const dur = nextSamples[0].RunTime - lapStart;
       nextSamples.forEach((r) => { r.LapTime = dur * 1000; });
     }
   }
-  return ref;
 };
 
 const parseSession = (rawData, name, type, options = {}) => {
@@ -655,6 +653,28 @@ const parseSession = (rawData, name, type, options = {}) => {
   };
 };
 
+// ─── Recompute laps with a manually-specified reference point ───────
+// Used when the user clicks on the Track plot to override auto-detection.
+// Preserves session id / engineType so UI state (selected lap, stint
+// assignments, etc.) remains valid.
+const recomputeLapsForSession = (session, newRef) => {
+  // Flatten all samples back into a single array, sort by RunTime
+  const allSamples = session.laps.flatMap((l) => l.samples);
+  allSamples.sort((a, b) => a.RunTime - b.RunTime);
+  // Re-assign Lap field based on new reference
+  applyLapsFromGpsRef(allSamples, newRef);
+  // Re-build session structure
+  const next = parseSession(allSamples, session.name, session.type, {
+    source: session.source,
+    hasGps: session.hasGps,
+    lapRef: newRef,
+  });
+  // Preserve persistent identifiers
+  next.id = session.id;
+  next.engineType = session.engineType;
+  return next;
+};
+
 // ─── UI primitives ───────────────────────────────────────────────
 const Panel = ({ title, accent, children, className = "" }) => (
   <div className={`bg-[#111720] border border-[#252d3a] ${className}`} style={{ borderRadius: 2 }}>
@@ -708,7 +728,7 @@ const RiderSelect = ({ value, onChange, riders, placeholder = "未割当", small
 };
 
 // ─── GPS track plot ──────────────────────────────────────────────
-const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", overlay = null, cursorSample = null, overlayCursorSample = null, height = 380, lapRef = null }) => {
+const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", overlay = null, cursorSample = null, overlayCursorSample = null, height = 380, lapRef = null, lapLineEditMode = false, onSetLapLine = null }) => {
   if (!lap || !lap.samples.length) return null;
   const pts = lap.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0)
     .map((s) => { const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
@@ -750,10 +770,34 @@ const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", ove
     return p.speed;
   };
 
+  // Convert SVG click position back to lat/lon (inverse of proj + llToMeters)
+  const handleSvgClick = (e) => {
+    if (!lapLineEditMode || !onSetLapLine) return;
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    // Map client (px) to SVG viewBox coords
+    const px = ((e.clientX - rect.left) / rect.width) * w;
+    const py = ((e.clientY - rect.top) / rect.height) * h;
+    // Invert proj: [px, py] = [x*sc+ox, oy-y*sc] → x = (px-ox)/sc, y = (oy-py)/sc
+    const xMeters = (px - ox) / sc;
+    const yMeters = (oy - py) / sc;
+    // Invert llToMeters
+    const newLat = lat0 + yMeters / 111320;
+    const newLon = lon0 + xMeters / (111320 * Math.cos(lat0 * Math.PI / 180));
+    onSetLapLine(newLat, newLon);
+  };
+
   return (
-    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG, cursor: lapLineEditMode ? "crosshair" : "default" }}
+         onClick={handleSvgClick}>
       {[...Array(8)].map((_, i) => (<line key={`vx${i}`} x1={(i * w) / 8} y1={0} x2={(i * w) / 8} y2={h} stroke={STROKE} strokeWidth={0.5} opacity={0.5} />))}
       {[...Array(5)].map((_, i) => (<line key={`vy${i}`} x1={0} y1={(i * h) / 5} x2={w} y2={(i * h) / 5} stroke={STROKE} strokeWidth={0.5} opacity={0.5} />))}
+      {lapLineEditMode && (
+        <text x={w / 2} y={20} textAnchor="middle" fill="#facc15" fontSize={11} fontFamily="monospace" fontWeight="bold"
+              style={{ paintOrder: "stroke", stroke: "#000000", strokeWidth: 3 }}>
+          ▼ クリックでスタートフィニッシュラインを設定
+        </text>
+      )}
       {overlay && overlay.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0).map((s, i) => {
         const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
         const [px, py] = proj(x, y);
@@ -1180,6 +1224,8 @@ function DroggerAnalyzer() {
   const [selectedLap, setSelectedLap] = useState(null);
   const [compareLap, setCompareLap] = useState(null);
   const [parseError, setParseError] = useState(null);
+  // Lap line edit mode (manual override of auto-detected S/F position)
+  const [lapLineEditMode, setLapLineEditMode] = useState(false);
   // Playback (animation) state
   const [playbackProgress, setPlaybackProgress] = useState(0);   // 0-1
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1271,6 +1317,21 @@ function DroggerAnalyzer() {
   const setSessionEngineType = (id, engineType) => {
     setSessions((ss) => ss.map((s) => (s.id === id ? { ...s, engineType } : s)));
   };
+
+  // Manually override the lap line for a session (called when user clicks on
+  // Track plot in edit mode). Re-runs lap detection with the new reference.
+  const handleSetLapLine = useCallback((newLat, newLon) => {
+    if (!activeSessionId) return;
+    setSessions((ss) => ss.map((s) => {
+      if (s.id !== activeSessionId) return s;
+      const newRef = { Latitude: newLat, Longitude: newLon };
+      return recomputeLapsForSession(s, newRef);
+    }));
+    // Clear selected/compare laps since lap numbering changed
+    setSelectedLap(null);
+    setCompareLap(null);
+    setLapLineEditMode(false);
+  }, [activeSessionId]);
 
   const addRider = () => {
     setRiders((rs) => [...rs, { id: newId(), name: `Rider ${rs.length + 1}`, color: RIDER_COLORS[rs.length % RIDER_COLORS.length] }]);
@@ -1692,7 +1753,25 @@ function DroggerAnalyzer() {
 
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (speed)`} accent>
-                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="speed" cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
+                        <div className="px-3 py-1.5 border-b border-[#252d3a] flex items-center justify-between" style={{ background: "#0d121a" }}>
+                          <div className="font-mono text-[10px] uppercase tracking-wider text-gray-500">
+                            S/F line:
+                            {activeSession.lapRef ? (
+                              <span className="ml-2 text-gray-300">
+                                {activeSession.lapRef.Latitude.toFixed(5)}, {activeSession.lapRef.Longitude.toFixed(5)}
+                              </span>
+                            ) : (
+                              <span className="ml-2 text-gray-500">未検出</span>
+                            )}
+                          </div>
+                          <button onClick={() => setLapLineEditMode((m) => !m)}
+                            className={`font-mono uppercase tracking-wider transition px-2 py-1 ${lapLineEditMode ? "bg-yellow-400 text-black" : "bg-transparent border border-[#252d3a] text-gray-300 hover:border-yellow-400 hover:text-yellow-400"}`}
+                            style={{ borderRadius: 2, fontSize: 10 }}
+                            title="クリックでスタートフィニッシュラインを手動設定">
+                            {lapLineEditMode ? "× 設定中…" : "✎ S/Fを動かす"}
+                          </button>
+                        </div>
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="speed" cursorSample={refCursor} lapRef={activeSession.lapRef} lapLineEditMode={lapLineEditMode} onSetLapLine={handleSetLapLine} height={isMobile ? 320 : 380} />
                       </Panel>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (rpm)`} accent>
                         <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="rpm" engineType={activeSession.engineType} cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />

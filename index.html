@@ -118,6 +118,51 @@ const rpmColor = (rpm, engineType = "4st") => {
   return `hsl(${h.toFixed(0)},${s.toFixed(0)}%,${l.toFixed(0)}%)`;
 };
 
+// ─── AFR color: full 8.0–20.0 range, engine-type aware target band ─
+// Multi-stop gradient: deep blue (rich) → cyan → green (target) → yellow → red (lean)
+const AFR_TARGETS = {
+  "2st": { low: 11.5, mid: 12.0, high: 12.5 },
+  "4st": { low: 12.5, mid: 13.0, high: 13.5 },
+};
+const AFR_MIN = 8.0;
+const AFR_MAX = 20.0;
+// HSL interpolation between stops; gradient "warmer = leaner = more dangerous"
+const afrColor = (afr, engineType = "4st") => {
+  const t = AFR_TARGETS[engineType] || AFR_TARGETS["4st"];
+  // Build stop array: [afrValue, h, s, l]
+  const stops = [
+    [AFR_MIN, 240, 80, 30],   // very rich: deep blue
+    [11.0,    210, 85, 50],   // rich: blue
+    [t.low,   170, 80, 50],   // approaching target: teal
+    [t.mid,   135, 85, 50],   // optimal target: vivid green
+    [t.high,   80, 85, 55],   // top of target: yellow-green
+    [14.7,     55, 95, 55],   // stoich: yellow
+    [17.0,     20, 95, 55],   // lean warning: orange
+    [AFR_MAX,   0, 90, 45],   // very lean: deep red
+  ];
+  // Clamp to range
+  if (afr <= stops[0][0]) {
+    const [, h, s, l] = stops[0];
+    return `hsl(${h},${s}%,${l}%)`;
+  }
+  if (afr >= stops[stops.length - 1][0]) {
+    const [, h, s, l] = stops[stops.length - 1];
+    return `hsl(${h},${s}%,${l}%)`;
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [a1, h1, s1, l1] = stops[i];
+    const [a2, h2, s2, l2] = stops[i + 1];
+    if (afr >= a1 && afr <= a2) {
+      const k = (afr - a1) / (a2 - a1);
+      const h = h1 + (h2 - h1) * k;
+      const s = s1 + (s2 - s1) * k;
+      const l = l1 + (l2 - l1) * k;
+      return `hsl(${h.toFixed(0)},${s.toFixed(0)}%,${l.toFixed(0)}%)`;
+    }
+  }
+  return "#888";
+};
+
 // ─── Cross-browser file text reader (file.text() needs Chrome 76+) ───
 const readFileAsText = (file) => new Promise((resolve, reject) => {
   if (typeof file.text === "function") {
@@ -215,6 +260,8 @@ const parseSession = (rawData, name, type) => {
   return {
     id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0,
     totalSamples: rawData.length,
+    hasAfr: rawData.some((r) => r.Afr && r.Afr > 0),
+    hasThrottle: rawData.some((r) => r.ThrottolePos && r.ThrottolePos > 0),
     duration: rawData[rawData.length - 1].RunTime - rawData[0].RunTime,
   };
 };
@@ -276,7 +323,7 @@ const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", ove
   if (!lap || !lap.samples.length) return null;
   const pts = lap.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0)
     .map((s) => { const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
-                  return { x, y, speed: s.Speed, rpm: s.Rpm, t: s.LapRunTime }; });
+                  return { x, y, speed: s.Speed, rpm: s.Rpm, afr: s.Afr, t: s.LapRunTime }; });
   if (!pts.length) return null;
 
   const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
@@ -300,11 +347,19 @@ const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", ove
   const speeds = pts.map((p) => p.speed); const sMin = Math.min(...speeds), sMax = Math.max(...speeds);
   const colorFor = (val) => {
     if (colorBy === "rpm") return rpmColor(val, engineType);
+    if (colorBy === "afr") return afrColor(val, engineType);
     const t = (val - sMin) / (sMax - sMin || 1); return `hsl(${280 - t * 280}, 85%, ${30 + t * 30}%)`;
   };
 
   // Build legend for RPM mode based on the engine stops
   const rpmStops = RPM_STOPS[engineType] || RPM_STOPS["4st"];
+  const afrTarget = AFR_TARGETS[engineType] || AFR_TARGETS["4st"];
+
+  const colorByValue = (p) => {
+    if (colorBy === "rpm") return p.rpm;
+    if (colorBy === "afr") return p.afr;
+    return p.speed;
+  };
 
   return (
     <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
@@ -316,7 +371,7 @@ const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", ove
         return <circle key={`o${i}`} cx={px} cy={py} r={1.4} fill={FG_MUTE} opacity={0.35} />;
       })}
       {pts.map((p, i) => { const [px, py] = proj(p.x, p.y);
-        return <circle key={i} cx={px} cy={py} r={2} fill={colorFor(colorBy === "rpm" ? p.rpm : p.speed)} />; })}
+        return <circle key={i} cx={px} cy={py} r={2} fill={colorFor(colorByValue(p))} />; })}
       {(() => {
         const [sx0, sy0] = proj(pts[0].x, pts[0].y);
         const [ex, ey] = proj(pts[pts.length - 1].x, pts[pts.length - 1].y);
@@ -361,6 +416,23 @@ const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", ove
           <text x={0} y={20} fill={FG_DIM} fontSize={9} fontFamily="monospace">{rpmStops.low.toLocaleString()}</text>
           <text x={((rpmStops.mid - rpmStops.low) / (rpmStops.high - rpmStops.low)) * 180} y={20} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">{rpmStops.mid.toLocaleString()}</text>
           <text x={180} y={20} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{rpmStops.high.toLocaleString()}</text>
+        </g>
+      ) : colorBy === "afr" ? (
+        <g transform={`translate(${w - 220}, 20)`}>
+          <text x={0} y={-5} fill={FG_MUTE} fontSize={9} fontFamily="monospace">A/F · {engineType.toUpperCase()} · target {afrTarget.mid}</text>
+          {[...Array(60)].map((_, i) => {
+            const t = i / 59;
+            const a = AFR_MIN + t * (AFR_MAX - AFR_MIN);
+            return <rect key={i} x={i * 3.3} y={0} width={3.4} height={6} fill={afrColor(a, engineType)} />;
+          })}
+          {/* Tick marks for target band */}
+          {[afrTarget.low, afrTarget.mid, afrTarget.high].map((v, i) => {
+            const x = ((v - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 198;
+            return <line key={i} x1={x} y1={-2} x2={x} y2={8} stroke={FG} strokeWidth={i === 1 ? 1 : 0.5} />;
+          })}
+          <text x={0} y={20} fill={FG_DIM} fontSize={9} fontFamily="monospace">{AFR_MIN.toFixed(1)}</text>
+          <text x={((afrTarget.mid - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 198} y={20} textAnchor="middle" fill={ACCENT} fontSize={9} fontFamily="monospace">{afrTarget.mid.toFixed(1)}</text>
+          <text x={198} y={20} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{AFR_MAX.toFixed(1)}</text>
         </g>
       ) : (
         <g transform={`translate(${w - 130}, 20)`}>
@@ -893,6 +965,7 @@ function DroggerAnalyzer() {
                   { id: "compare", label: "Compare", Icon: Layers },
                   { id: "riders", label: "Riders", Icon: Users },
                   { id: "strategy", label: "Strategy", Icon: Gauge },
+                  ...(activeSession.hasAfr ? [{ id: "tuning", label: "Tuning", Icon: Gauge }] : []),
                 ].map(({ id, label, Icon }) => {
                   const active = activeTab === id;
                   return (
@@ -969,10 +1042,13 @@ function DroggerAnalyzer() {
                           {[0.25, 0.5, 1, 2, 4].map((v) => (<option key={v} value={v}>{v}×</option>))}
                         </select>
                       </div>
-                      <div className="grid grid-cols-3 gap-3 p-3" style={{ borderLeft: `3px solid ${ACCENT}` }}>
+                      <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: `3px solid ${ACCENT}` }}>
                             <Stat label="Time" value={fmtTime(elapsedSec)} />
                         <Stat label="Speed" value={fmtNum(refCursor?.Speed ?? 0, 1)} unit="km/h" />
                         <Stat label="RPM" value={(refCursor?.Rpm ?? 0).toFixed(0)} unit="rpm" />
+                        {activeSession.hasAfr && (
+                          <Stat label="A/F" value={fmtNum(refCursor?.Afr ?? 0, 2)} />
+                        )}
                       </div>
                     </Panel>
 
@@ -984,6 +1060,11 @@ function DroggerAnalyzer() {
                         <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="rpm" engineType={activeSession.engineType} cursorSample={refCursor} height={isMobile ? 320 : 380} />
                       </Panel>
                     </div>
+                    {activeSession.hasAfr && (
+                      <Panel title={`Track — Lap ${selectedLapObj.lap} (A/F)`} accent>
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="afr" engineType={activeSession.engineType} cursorSample={refCursor} height={isMobile ? 320 : 380} />
+                      </Panel>
+                    )}
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-5"}`}>
                       <Panel className="p-3">
                         <div className="text-[9px] uppercase tracking-[0.15em] font-mono text-gray-500 mb-0.5">Rider</div>
@@ -1058,16 +1139,22 @@ function DroggerAnalyzer() {
                         </select>
                       </div>
                       <div className={`grid gap-0 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
-                        <div className="grid grid-cols-3 gap-3 p-3" style={{ borderLeft: `3px solid ${ACCENT}` }}>
+                        <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: `3px solid ${ACCENT}` }}>
                               <Stat label={`Lap ${selectedLapObj.lap} · time`} value={fmtTime(refElapsedDisplay)} />
                           <Stat label="Speed" value={fmtNum(refCursor?.Speed ?? 0, 1)} unit="km/h" />
                           <Stat label="RPM" value={(refCursor?.Rpm ?? 0).toFixed(0)} />
+                          {activeSession.hasAfr && (
+                            <Stat label="A/F" value={fmtNum(refCursor?.Afr ?? 0, 2)} />
+                          )}
                         </div>
                         {compareLapObj ? (
-                          <div className="grid grid-cols-3 gap-3 p-3" style={{ borderLeft: "3px solid #22d3ee" }}>
+                          <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: "3px solid #22d3ee" }}>
                             <Stat label={`Lap ${compareLapObj.lap} · time`} value={fmtTime(cmpElapsedDisplay)} />
                             <Stat label="Speed" value={fmtNum(cmpCursor?.Speed ?? 0, 1)} unit="km/h" />
                             <Stat label="RPM" value={(cmpCursor?.Rpm ?? 0).toFixed(0)} />
+                            {activeSession.hasAfr && (
+                              <Stat label="A/F" value={fmtNum(cmpCursor?.Afr ?? 0, 2)} />
+                            )}
                           </div>
                         ) : (
                           <div className="p-3 text-gray-600 font-mono text-xs flex items-center" style={{ borderLeft: "3px solid #22d3ee" }}>
@@ -1221,6 +1308,185 @@ function DroggerAnalyzer() {
                     </div>
                   </Panel>
                 </>)}
+
+                {activeTab === "tuning" && activeSession.hasAfr && (() => {
+                  const allSamples = activeSession.laps.flatMap((l) => l.samples)
+                    .filter((s) => s.Rpm > 1000 && s.Afr >= AFR_MIN && s.Afr <= AFR_MAX);
+                  if (!allSamples.length) {
+                    return (<Panel className="p-8 text-center text-gray-500 font-mono text-xs">A/Fデータが解析できません</Panel>);
+                  }
+                  const target = AFR_TARGETS[activeSession.engineType] || AFR_TARGETS["4st"];
+
+                  const nBins = 24;
+                  const binSize = (AFR_MAX - AFR_MIN) / nBins;
+                  const bins = new Array(nBins).fill(0);
+                  allSamples.forEach((s) => {
+                    const b = Math.min(nBins - 1, Math.max(0, Math.floor((s.Afr - AFR_MIN) / binSize)));
+                    bins[b]++;
+                  });
+                  const binMax = Math.max(...bins);
+                  const totalSamples = allSamples.length;
+
+                  const lapWOT = activeSession.laps
+                    .filter((l) => l.duration > 60 && l.duration < 200)
+                    .map((l) => {
+                      const wot = l.samples.filter((s) => s.ThrottolePos > 60 && s.Afr >= AFR_MIN);
+                      const avg = wot.length ? wot.reduce((a, s) => a + s.Afr, 0) / wot.length : null;
+                      return { lap: l.lap, avg, count: wot.length };
+                    })
+                    .filter((d) => d.avg != null);
+
+                  const stride = Math.max(1, Math.floor(allSamples.length / 2000));
+                  const scatter = allSamples.filter((_, i) => i % stride === 0);
+
+                  const sortedAfr = allSamples.map((s) => s.Afr).sort((a, b) => a - b);
+                  const median = sortedAfr[Math.floor(sortedAfr.length / 2)];
+                  const inTarget = allSamples.filter((s) => s.Afr >= target.low && s.Afr <= target.high).length;
+                  const tooLean = allSamples.filter((s) => s.Afr > target.high).length;
+                  const tooRich = allSamples.filter((s) => s.Afr < target.low).length;
+
+                  return (<>
+                    <Panel className="p-3">
+                      <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">
+                        A/F Summary — engine: {activeSession.engineType.toUpperCase()} · target {target.low}–{target.high}
+                      </div>
+                      <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-5"}`}>
+                        <Stat label="Samples" value={totalSamples.toLocaleString()} />
+                        <Stat label="Median A/F" value={median.toFixed(2)} />
+                        <Stat label="In Target" value={`${(100 * inTarget / totalSamples).toFixed(1)}%`} />
+                        <Stat label="Rich" value={`${(100 * tooRich / totalSamples).toFixed(1)}%`} />
+                        <Stat label="Lean" value={`${(100 * tooLean / totalSamples).toFixed(1)}%`} />
+                      </div>
+                    </Panel>
+
+                    <Panel title="A/F Histogram (full session)" accent>
+                      <svg viewBox="0 0 800 240" className="w-full" style={{ background: BG }}>
+                        {[0.25, 0.5, 0.75, 1].map((t, i) => (
+                          <line key={i} x1={50} y1={20 + (180 * (1 - t))} x2={780} y2={20 + (180 * (1 - t))} stroke={STROKE} strokeWidth={0.5} />
+                        ))}
+                        {bins.map((count, i) => {
+                          const afrLow = AFR_MIN + i * binSize;
+                          const afrCenter = afrLow + binSize / 2;
+                          const barH = (count / binMax) * 180;
+                          const xL = 50 + (i * (730 / nBins));
+                          const wd = 730 / nBins - 1;
+                          return (<rect key={i} x={xL} y={200 - barH} width={wd} height={barH} fill={afrColor(afrCenter, activeSession.engineType)} />);
+                        })}
+                        <rect x={50 + ((target.low - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 730}
+                              y={20}
+                              width={((target.high - target.low) / (AFR_MAX - AFR_MIN)) * 730}
+                              height={180}
+                              fill="none" stroke={ACCENT} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
+                        {[8, 10, 12, 14, 14.7, 16, 18, 20].map((v, i) => {
+                          const x = 50 + ((v - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 730;
+                          return (
+                            <g key={i}>
+                              <line x1={x} y1={200} x2={x} y2={205} stroke={FG_MUTE} strokeWidth={0.5} />
+                              <text x={x} y={218} fill={FG_DIM} fontSize={10} fontFamily="monospace" textAnchor="middle">{v}</text>
+                            </g>
+                          );
+                        })}
+                        <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">samples ↑</text>
+                        <text x={780} y={234} textAnchor="end" fill={FG_DIM} fontSize={10} fontFamily="monospace">A/F →</text>
+                      </svg>
+                    </Panel>
+
+                    <Panel title="RPM × A/F — engine map check" accent>
+                      <svg viewBox="0 0 800 320" className="w-full" style={{ background: BG }}>
+                        {(() => {
+                          const rpmMax = Math.max(...scatter.map((s) => s.Rpm)) * 1.05;
+                          const sx = (r) => 50 + (r / rpmMax) * 730;
+                          const sy = (a) => 280 - ((a - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 260;
+                          return (<>
+                            <rect x={50} y={sy(target.high)} width={730} height={sy(target.low) - sy(target.high)}
+                              fill={ACCENT} opacity={0.08} />
+                            {[8, 10, 12, 13, 14, 14.7, 16, 18, 20].map((v, i) => (
+                              <g key={i}>
+                                <line x1={50} y1={sy(v)} x2={780} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+                                <text x={45} y={sy(v) + 3} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}</text>
+                              </g>
+                            ))}
+                            {[2000, 4000, 6000, 8000, 10000, 12000].filter((v) => v <= rpmMax).map((v, i) => (
+                              <g key={i}>
+                                <line x1={sx(v)} y1={20} x2={sx(v)} y2={280} stroke={STROKE} strokeWidth={0.3} />
+                                <text x={sx(v)} y={295} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v.toLocaleString()}</text>
+                              </g>
+                            ))}
+                            {scatter.map((s, i) => (
+                              <circle key={i} cx={sx(s.Rpm)} cy={sy(s.Afr)} r={1.4} fill={afrColor(s.Afr, activeSession.engineType)} opacity={0.65} />
+                            ))}
+                            <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">A/F ↑</text>
+                            <text x={780} y={313} textAnchor="end" fill={FG_DIM} fontSize={10} fontFamily="monospace">RPM →</text>
+                          </>);
+                        })()}
+                      </svg>
+                    </Panel>
+
+                    {activeSession.hasThrottle && (
+                      <Panel title="Throttle × A/F — load mapping" accent>
+                        <svg viewBox="0 0 800 320" className="w-full" style={{ background: BG }}>
+                          {(() => {
+                            const sx = (t) => 50 + (t / 100) * 730;
+                            const sy = (a) => 280 - ((a - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 260;
+                            const throttled = scatter.filter((s) => s.ThrottolePos > 0);
+                            return (<>
+                              <rect x={50} y={sy(target.high)} width={730} height={sy(target.low) - sy(target.high)}
+                                fill={ACCENT} opacity={0.08} />
+                              {[8, 10, 12, 13, 14, 14.7, 16, 18, 20].map((v, i) => (
+                                <g key={i}>
+                                  <line x1={50} y1={sy(v)} x2={780} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+                                  <text x={45} y={sy(v) + 3} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              {[0, 25, 50, 75, 100].map((v, i) => (
+                                <g key={i}>
+                                  <line x1={sx(v)} y1={20} x2={sx(v)} y2={280} stroke={STROKE} strokeWidth={0.3} />
+                                  <text x={sx(v)} y={295} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}%</text>
+                                </g>
+                              ))}
+                              {throttled.map((s, i) => (
+                                <circle key={i} cx={sx(s.ThrottolePos)} cy={sy(s.Afr)} r={1.4} fill={afrColor(s.Afr, activeSession.engineType)} opacity={0.65} />
+                              ))}
+                              <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">A/F ↑</text>
+                              <text x={780} y={313} textAnchor="end" fill={FG_DIM} fontSize={10} fontFamily="monospace">Throttle →</text>
+                            </>);
+                          })()}
+                        </svg>
+                      </Panel>
+                    )}
+
+                    {activeSession.hasThrottle && lapWOT.length > 0 && (
+                      <Panel title="Per-lap WOT (>60% throttle) average A/F — tuning consistency" accent>
+                        <svg viewBox="0 0 800 240" className="w-full" style={{ background: BG }}>
+                          {(() => {
+                            const sx = (i) => 50 + (i / Math.max(1, lapWOT.length - 1)) * 730;
+                            const sy = (a) => 200 - ((a - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 180;
+                            return (<>
+                              <rect x={50} y={sy(target.high)} width={730} height={sy(target.low) - sy(target.high)}
+                                fill={ACCENT} opacity={0.1} />
+                              {[10, 12, 13, 14, 16].map((v, i) => (
+                                <g key={i}>
+                                  <line x1={50} y1={sy(v)} x2={780} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+                                  <text x={45} y={sy(v) + 3} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              <path d={lapWOT.map((d, i) => `${i ? "L" : "M"}${sx(i)},${sy(d.avg)}`).join("")}
+                                fill="none" stroke={ACCENT} strokeWidth={1} opacity={0.5} />
+                              {lapWOT.map((d, i) => (
+                                <g key={i}>
+                                  <circle cx={sx(i)} cy={sy(d.avg)} r={4} fill={afrColor(d.avg, activeSession.engineType)} stroke={FG} strokeWidth={0.5} />
+                                  <text x={sx(i)} y={220} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">L{d.lap}</text>
+                                  <text x={sx(i)} y={sy(d.avg) - 8} textAnchor="middle" fill={FG} fontSize={9} fontFamily="monospace">{d.avg.toFixed(2)}</text>
+                                </g>
+                              ))}
+                              <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">avg A/F at WOT ↑</text>
+                            </>);
+                          })()}
+                        </svg>
+                      </Panel>
+                    )}
+                  </>);
+                })()}
               </div>
             </>
           )}

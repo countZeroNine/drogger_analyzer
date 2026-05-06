@@ -56,8 +56,17 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.5.3";
+const APP_VERSION = "1.5.4";
 const CHANGELOG = [
+  {
+    version: "1.5.4",
+    date: "2026-05-06",
+    notes: [
+      "GPSラップ検出v4：高速度サンプル（最高速の70%以上）に絞ってヒストグラムを取ることで、ストレート上に起点を配置するよう改善",
+      "v3はバイクの滞在時間が長い低速コーナーが選ばれてしまう問題があった（東ピット直前のヘアピンなど）",
+      "Track / Compareタブにスタートフィニッシュ（S/F）マーカーを表示。検出半径50mも併せて点線で表示",
+    ],
+  },
   {
     version: "1.5.3",
     date: "2026-05-06",
@@ -420,37 +429,44 @@ const parseAracerLog = (text, format) => {
   return { data, hasGps: hasAnyGps, format, sampleStride };
 };
 
-// ─── GPS-based lap detection v3 ─────────────────────────────────
-// Strategy: use a 2D histogram of high-speed GPS samples to find the most-visited
-// area on the racing line, and use that as the lap reference point.
+// ─── GPS-based lap detection v4 ─────────────────────────────────
+// Strategy: of all GPS samples in the top 70% speed range (i.e., on a fast
+// straight), find the cell most frequently visited. This biases toward the
+// longest, fastest straight on the track — which is where the lap reference
+// line should naturally be placed.
 //
-// Why histogram (vs simple centroid v2):
-//   - Robust to GPS noise/glitches (outlier points end up alone in unique cells)
-//   - Robust to closed-loop track shape (centroid of a loop lands inside the loop,
-//     possibly on grass; histogram peak lands on the actual racing line)
+// Why high speed threshold (vs all fast samples in v3):
+//   - At 40% threshold, slow corners stay in the pool. Bike spends MORE TIME
+//     in slow corners (more samples per meter), so corners win the histogram.
+//   - At 70%+ threshold, only actual straights remain. The longest straight
+//     wins by sample count.
 //
-// v1 (deprecated) used first GPS sample → failed when GPS started in pit lane.
-// v2 (deprecated) used geometric centroid → failed for noisy data and loop tracks.
+// The detected reference point is exposed as session.lapRef so the UI can
+// display it as a marker on the Track tab.
 const detectLapsFromGps = (data) => {
-  // Step 1: collect valid GPS samples (already sanitized in parser, but double-check)
   const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
-  if (validGps.length < 50) return data; // not enough GPS data
+  if (validGps.length < 50) return null;
 
-  // Step 2: filter to high-speed samples (bike on track at speed)
   const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
-  const fastThreshold = maxSpeed * 0.4;
-  let fastSamples = validGps.filter((r) => r.Speed > fastThreshold);
-  if (fastSamples.length < 50) fastSamples = validGps; // fallback if too few
+  // Tier 1: top 70% speed (fast straights only)
+  let threshold = maxSpeed * 0.7;
+  let fastSamples = validGps.filter((r) => r.Speed > threshold);
+  // Tier 2: fall back to top 50% if too few samples (short session, low max speed)
+  if (fastSamples.length < 20) {
+    threshold = maxSpeed * 0.5;
+    fastSamples = validGps.filter((r) => r.Speed > threshold);
+  }
+  // Tier 3: fall back to all valid GPS if still too few
+  if (fastSamples.length < 20) fastSamples = validGps;
 
-  // Step 3: bin into ~10m × 10m cells and find the most-visited cell
-  // 1 degree latitude ≈ 111,320 m, so 0.0001° ≈ 11 m
+  // Bin into ~10m × 10m cells (1° lat ≈ 111,320 m, so 0.0001° ≈ 11 m)
   const GRID = 0.0001;
   const cells = new Map();
   for (const r of fastSamples) {
     const key = `${Math.round(r.Latitude / GRID)},${Math.round(r.Longitude / GRID)}`;
     cells.set(key, (cells.get(key) || 0) + 1);
   }
-  if (!cells.size) return data;
+  if (!cells.size) return null;
 
   let bestKey = null, bestCount = 0;
   for (const [k, c] of cells) {
@@ -472,7 +488,6 @@ const detectLapsFromGps = (data) => {
   const FAR_M = 200;
   const COOLDOWN_S = 30;
 
-  // Step 4: detect zone-entry transitions
   let currentLap = 0;
   let maxFromRef = 0;
   let lastLapTime = -1e9;
@@ -494,8 +509,7 @@ const detectLapsFromGps = (data) => {
     r.Lap = currentLap;
   }
 
-  // Step 5: compute LapRunTime + LapTime per Drogger semantics
-  // (LapTime in all rows of lap N+1 = duration of lap N in ms)
+  // LapRunTime + LapTime per Drogger semantics
   const lapBuckets = new Map();
   for (const r of data) {
     if (!lapBuckets.has(r.Lap)) lapBuckets.set(r.Lap, []);
@@ -514,11 +528,11 @@ const detectLapsFromGps = (data) => {
       nextSamples.forEach((r) => { r.LapTime = dur * 1000; });
     }
   }
-  return data;
+  return ref; // expose chosen reference point for UI display
 };
 
 const parseSession = (rawData, name, type, options = {}) => {
-  const { source = "drogger", hasGps = true } = options;
+  const { source = "drogger", hasGps = true, lapRef = null } = options;
   const lapMap = new Map();
   rawData.forEach((row) => {
     const lap = row.Lap;
@@ -593,6 +607,7 @@ const parseSession = (rawData, name, type, options = {}) => {
     id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0,
     source,
     hasGps: hasGps && rawData.some((r) => r.Latitude !== 0 && r.Longitude !== 0),
+    lapRef, // GPS-based lap reference point (only set when auto-detected)
     totalSamples: rawData.length,
     hasAfr: rawData.some((r) => r.Afr && r.Afr > 0),
     hasThrottle: rawData.some((r) => r.ThrottolePos && r.ThrottolePos > 0),
@@ -653,7 +668,7 @@ const RiderSelect = ({ value, onChange, riders, placeholder = "未割当", small
 };
 
 // ─── GPS track plot ──────────────────────────────────────────────
-const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", overlay = null, cursorSample = null, overlayCursorSample = null, height = 380 }) => {
+const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", overlay = null, cursorSample = null, overlayCursorSample = null, height = 380, lapRef = null }) => {
   if (!lap || !lap.samples.length) return null;
   const pts = lap.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0)
     .map((s) => { const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
@@ -724,6 +739,29 @@ const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", ove
           <g>
             <circle cx={px} cy={py} r={12} fill="none" stroke="#22d3ee" strokeWidth={1.5} opacity={0.4} />
             <circle cx={px} cy={py} r={6} fill="#22d3ee" stroke="#0a0e14" strokeWidth={1.5} />
+          </g>
+        );
+      })()}
+      {/* Lap reference marker (S/F line position auto-detected) */}
+      {lapRef && lapRef.Latitude && (() => {
+        const [x, y] = llToMeters(lapRef.Latitude, lapRef.Longitude, lat0, lon0);
+        const [px, py] = proj(x, y);
+        // 50m detection radius circle (matches NEAR_M in detector)
+        const rPx = 50 * sc;
+        return (
+          <g>
+            {/* Detection radius (faint) */}
+            <circle cx={px} cy={py} r={rPx} fill="none" stroke="#ffffff" strokeWidth={0.8} strokeDasharray="3,3" opacity={0.35} />
+            {/* Center marker — checkered flag look (4-square pattern) */}
+            <rect x={px - 6} y={py - 6} width={6} height={6} fill="#ffffff" />
+            <rect x={px}     y={py - 6} width={6} height={6} fill="#000000" />
+            <rect x={px - 6} y={py}     width={6} height={6} fill="#000000" />
+            <rect x={px}     y={py}     width={6} height={6} fill="#ffffff" />
+            <rect x={px - 6} y={py - 6} width={12} height={12} fill="none" stroke="#ffffff" strokeWidth={1} />
+            <text x={px + 10} y={py - 6} fill="#ffffff" fontSize={10} fontFamily="monospace" fontWeight="bold"
+                  style={{ paintOrder: "stroke", stroke: "#000000", strokeWidth: 2.5 }}>
+              S/F
+            </text>
           </g>
         );
       })()}
@@ -1160,10 +1198,11 @@ function DroggerAnalyzer() {
           }
           // For aRacer LM with valid GPS but empty IR_LapNumber: detect laps from GPS trajectory
           const allZeroLap = data.every((r) => r.Lap === 0);
+          let lapRef = null;
           if (hasGps && allZeroLap) {
-            detectLapsFromGps(data);
+            lapRef = detectLapsFromGps(data);
           }
-          const session = parseSession(data, baseName, type, { source: fmt, hasGps });
+          const session = parseSession(data, baseName, type, { source: fmt, hasGps, lapRef });
           newSessions.push(session);
         } else {
           setParseError(`${file.name}: 認識できないログ形式です（Drogger CSV または aRacer .loga が対象）`);
@@ -1613,15 +1652,15 @@ function DroggerAnalyzer() {
 
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (speed)`} accent>
-                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="speed" cursorSample={refCursor} height={isMobile ? 320 : 380} />
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="speed" cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
                       </Panel>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (rpm)`} accent>
-                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="rpm" engineType={activeSession.engineType} cursorSample={refCursor} height={isMobile ? 320 : 380} />
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="rpm" engineType={activeSession.engineType} cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
                       </Panel>
                     </div>
                     {activeSession.hasAfr && (
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (A/F)`} accent>
-                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="afr" engineType={activeSession.engineType} cursorSample={refCursor} height={isMobile ? 320 : 380} />
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="afr" engineType={activeSession.engineType} cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
                       </Panel>
                     )}
                     {/* Unified telemetry trace */}
@@ -1734,7 +1773,7 @@ function DroggerAnalyzer() {
 
                     <Panel title="Track Overlay" accent>
                       <TrackPlot lap={selectedLapObj} overlay={compareLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0}
-                        cursorSample={refCursor} overlayCursorSample={cmpCursor} height={isMobile ? 360 : 380} />
+                        cursorSample={refCursor} overlayCursorSample={cmpCursor} lapRef={activeSession.lapRef} height={isMobile ? 360 : 380} />
                     </Panel>
                     <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
                       <div className="p-2">

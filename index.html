@@ -65,8 +65,17 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.4.0";
 const CHANGELOG = [
+  {
+    version: "1.4.0",
+    date: "2026-05-06",
+    notes: [
+      "Speed・RPM・A/Fを統合した複合テレメトリグラフを追加（Drogger純正アプリ風）",
+      "Track / Compare 両モードで距離軸ベースの統合可視化",
+      "色分け：Speed=黄、RPM=シアン、A/F=ライム緑。Compareでは比較ラップが破線表示",
+    ],
+  },
   {
     version: "1.3.0",
     date: "2026-05-06",
@@ -587,6 +596,147 @@ const TracePlot = ({ lapA, lapB, mode = "speed", height = 280, label, cursorSamp
         </g>
       )}
       {label && <text x={pad.l + 6} y={pad.t + 12} fill={FG_DIM} fontSize={10} fontFamily="monospace">{label}</text>}
+    </svg>
+  );
+};
+
+// ─── Multi-metric trace plot (Speed + RPM + A/F unified) ────────
+// Drogger-style: shared distance axis, 3 metrics overlaid with their own scales,
+// color-coded. Reference lap solid, compare lap dashed.
+const MULTI_METRICS = [
+  { key: "Speed", short: "SPD", label: "km/h", color: "#facc15", fmt: (v) => v.toFixed(1) },
+  { key: "Rpm",   short: "RPM", label: "rpm",  color: "#22d3ee", fmt: (v) => v.toFixed(0) },
+  { key: "Afr",   short: "A/F", label: "",     color: "#84cc16", fmt: (v) => v.toFixed(2) },
+];
+
+const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB = null, hasAfr = false, height = 360, isMobile = false }) => {
+  if (!lapA) return null;
+  const w = 800, h = height, pad = { l: 12, r: 12, t: 38, b: 28 };
+
+  const distOf = (lap) => {
+    let d = 0; let lastLat = null, lastLon = null;
+    const lat0Lap = lap.samples.find((s) => s.Latitude > 0)?.Latitude || 0;
+    const lon0Lap = lap.samples.find((s) => s.Longitude > 0)?.Longitude || 0;
+    return lap.samples.map((s) => {
+      if (s.Latitude > 0) {
+        if (lastLat !== null) {
+          const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0Lap, lon0Lap);
+          const [lx, ly] = llToMeters(lastLat, lastLon, lat0Lap, lon0Lap);
+          d += Math.hypot(x - lx, y - ly);
+        }
+        lastLat = s.Latitude; lastLon = s.Longitude;
+      }
+      return { d, Speed: s.Speed, Rpm: s.Rpm, Afr: s.Afr };
+    });
+  };
+
+  const a = distOf(lapA);
+  const b = lapB ? distOf(lapB) : null;
+  const allD = [...a.map((p) => p.d), ...(b ? b.map((p) => p.d) : [])];
+  const dMax = Math.max(...allD) || 1;
+  const sx = (d) => pad.l + (d / dMax) * (w - pad.l - pad.r);
+
+  const metrics = MULTI_METRICS.filter((m) => m.key !== "Afr" || hasAfr);
+  const scales = metrics.map((m) => {
+    let min, max;
+    if (m.key === "Afr") { min = AFR_MIN; max = AFR_MAX; }
+    else if (m.key === "Speed") {
+      const allVals = [...a.map((p) => p.Speed), ...(b ? b.map((p) => p.Speed) : [])];
+      min = 0; max = Math.max(Math.max(...allVals) * 1.05, 50);
+    } else { // Rpm
+      const allVals = [...a.map((p) => p.Rpm), ...(b ? b.map((p) => p.Rpm) : [])];
+      min = 0; max = Math.max(Math.max(...allVals) * 1.05, 5000);
+    }
+    return { ...m, min, max };
+  });
+
+  const syFor = (val, scale) => h - pad.b - ((val - scale.min) / (scale.max - scale.min)) * (h - pad.t - pad.b);
+  const pathOf = (arr, scale) =>
+    arr.map((p, i) => `${i ? "L" : "M"}${sx(p.d).toFixed(1)},${syFor(p[scale.key], scale).toFixed(1)}`).join("");
+
+  const cursorAt = (lap, sampleArr, cursorSample) => {
+    if (!cursorSample) return null;
+    const idx = lap.samples.indexOf(cursorSample);
+    if (idx < 0 || idx >= sampleArr.length) return null;
+    return sampleArr[idx];
+  };
+  const cursorA = cursorAt(lapA, a, cursorSampleA);
+  const cursorB = lapB ? cursorAt(lapB, b, cursorSampleB) : null;
+
+  // Top legend: chip per metric with name + range; current cursor value if available
+  const chipWidth = (w - pad.l - pad.r) / scales.length;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
+      {/* Top legend strip */}
+      {scales.map((scale, i) => {
+        const cx = pad.l + i * chipWidth;
+        const fmtRange = (() => {
+          if (scale.key === "Afr") return `${scale.min.toFixed(1)}-${scale.max.toFixed(1)}`;
+          if (scale.key === "Rpm") return `0-${(scale.max / 1000).toFixed(1)}k`;
+          return `0-${scale.max.toFixed(0)}`;
+        })();
+        return (
+          <g key={scale.key} transform={`translate(${cx}, 6)`}>
+            <rect x={0} y={0} width={9} height={9} fill={scale.color} />
+            <text x={14} y={9} fill={scale.color} fontSize={11} fontFamily="monospace" fontWeight="bold">{scale.short}</text>
+            <text x={48} y={9} fill={FG_DIM} fontSize={9} fontFamily="monospace">
+              {fmtRange}{scale.label ? ` ${scale.label}` : ""}
+            </text>
+            {cursorA && (
+              <text x={chipWidth - 8} y={9} textAnchor="end" fill={scale.color} fontSize={11} fontFamily="monospace" fontWeight="bold">
+                {scale.fmt(cursorA[scale.key])}
+                {cursorB ? <tspan fill="#22d3ee" opacity={0.85}> / {scale.fmt(cursorB[scale.key])}</tspan> : ""}
+              </text>
+            )}
+          </g>
+        );
+      })}
+
+      {/* Horizontal grid (visual separation only, no specific values) */}
+      {[0.25, 0.5, 0.75].map((t, i) => (
+        <line key={i} x1={pad.l} y1={pad.t + t * (h - pad.t - pad.b)} x2={w - pad.r} y2={pad.t + t * (h - pad.t - pad.b)} stroke={STROKE} strokeWidth={0.4} />
+      ))}
+
+      {/* Vertical grid */}
+      {[0.25, 0.5, 0.75].map((t, i) => (
+        <line key={i} x1={pad.l + t * (w - pad.l - pad.r)} y1={pad.t} x2={pad.l + t * (w - pad.l - pad.r)} y2={h - pad.b} stroke={STROKE} strokeWidth={0.3} />
+      ))}
+
+      {/* Distance ticks */}
+      {[0, 0.25, 0.5, 0.75, 1].map((t, i) => (
+        <text key={i} x={pad.l + t * (w - pad.l - pad.r)} y={h - pad.b + 14} fill={FG_MUTE} fontSize={9} fontFamily="monospace"
+          textAnchor={i === 0 ? "start" : i === 4 ? "end" : "middle"}>
+          {(t * dMax).toFixed(0)}m
+        </text>
+      ))}
+
+      {/* Lines: compare lap first (dashed, dimmed) so reference draws on top */}
+      {b && scales.map((scale) => (
+        <path key={`b-${scale.key}`} d={pathOf(b, scale)} fill="none" stroke={scale.color} strokeWidth={1.2} strokeDasharray="4 3" opacity={0.6} />
+      ))}
+      {scales.map((scale) => (
+        <path key={`a-${scale.key}`} d={pathOf(a, scale)} fill="none" stroke={scale.color} strokeWidth={1.6} />
+      ))}
+
+      {/* Cursors */}
+      {cursorB && (
+        <g>
+          <line x1={sx(cursorB.d)} y1={pad.t} x2={sx(cursorB.d)} y2={h - pad.b} stroke="#22d3ee" strokeWidth={0.6} opacity={0.55} strokeDasharray="3 2" />
+          {scales.map((scale) => (
+            <circle key={scale.key} cx={sx(cursorB.d)} cy={syFor(cursorB[scale.key], scale)} r={3} fill={scale.color} stroke="#0a0e14" strokeWidth={1} opacity={0.75} />
+          ))}
+        </g>
+      )}
+      {cursorA && (
+        <g>
+          <line x1={sx(cursorA.d)} y1={pad.t} x2={sx(cursorA.d)} y2={h - pad.b} stroke={ACCENT} strokeWidth={0.8} opacity={0.8} />
+          {scales.map((scale) => (
+            <circle key={scale.key} cx={sx(cursorA.d)} cy={syFor(cursorA[scale.key], scale)} r={4} fill={scale.color} stroke="#0a0e14" strokeWidth={1.2} />
+          ))}
+          <text x={sx(cursorA.d) + 6} y={pad.t - 4} fill={ACCENT} fontSize={9} fontFamily="monospace">{cursorA.d.toFixed(0)}m</text>
+        </g>
+      )}
     </svg>
   );
 };
@@ -1165,6 +1315,15 @@ function DroggerAnalyzer() {
                         <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="afr" engineType={activeSession.engineType} cursorSample={refCursor} height={isMobile ? 320 : 380} />
                       </Panel>
                     )}
+                    {/* Unified telemetry trace */}
+                    <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
+                      <div className="p-2">
+                        <MultiTracePlot lapA={selectedLapObj}
+                          cursorSampleA={refCursor}
+                          hasAfr={activeSession.hasAfr} isMobile={isMobile}
+                          height={isMobile ? 300 : 340} />
+                      </div>
+                    </Panel>
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-5"}`}>
                       <Panel className="p-3">
                         <div className="text-[9px] uppercase tracking-[0.15em] font-mono text-gray-500 mb-0.5">Rider</div>
@@ -1268,8 +1427,14 @@ function DroggerAnalyzer() {
                       <TrackPlot lap={selectedLapObj} overlay={compareLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0}
                         cursorSample={refCursor} overlayCursorSample={cmpCursor} height={isMobile ? 360 : 380} />
                     </Panel>
-                    <Panel title="Speed Trace" accent><div className="p-2"><TracePlot lapA={selectedLapObj} lapB={compareLapObj} mode="speed" label="km/h vs distance" cursorSampleA={refCursor} cursorSampleB={cmpCursor} /></div></Panel>
-                    <Panel title="RPM Trace" accent><div className="p-2"><TracePlot lapA={selectedLapObj} lapB={compareLapObj} mode="rpm" label="rpm vs distance" cursorSampleA={refCursor} cursorSampleB={cmpCursor} /></div></Panel>
+                    <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
+                      <div className="p-2">
+                        <MultiTracePlot lapA={selectedLapObj} lapB={compareLapObj}
+                          cursorSampleA={refCursor} cursorSampleB={cmpCursor}
+                          hasAfr={activeSession.hasAfr} isMobile={isMobile}
+                          height={isMobile ? 320 : 360} />
+                      </div>
+                    </Panel>
                     {compareLapObj && (
                       <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-4"}`}>
                         <Panel className="p-3"><Stat label="Δ Lap Time" value={(selectedLapObj.duration - compareLapObj.duration).toFixed(3)} unit="s" /></Panel>

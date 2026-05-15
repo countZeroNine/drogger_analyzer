@@ -495,9 +495,74 @@ const parseAracerLog = (text, format) => {
 //
 // Manual override: the user can click on the Track plot to override the
 // detected position (handled in App component, calls recomputeLapsWithRef).
+// ─── Circuit DB (aRacer LM GPS ラップ検出用フィニッシュライン座標) ───
+
+const CIRCUITS = [
+  {
+    id: "tsukuba_2000",
+    name: "筑波サーキット コース2000",
+    finishLine: [
+      { Latitude: 36.1501667, Longitude: 139.9194167 },
+      { Latitude: 36.1500556, Longitude: 139.9200556 },
+    ],
+  },
+  {
+    id: "tsukuba_1000",
+    name: "筑波サーキット コース1000",
+    finishLine: [
+      { Latitude: 36.1510833, Longitude: 139.9247778 },
+      { Latitude: 36.1510000, Longitude: 139.9251389 },
+    ],
+  },
+  {
+    id: "motegi_kart_north",
+    name: "モビリティリゾートもてぎ 北ショートコース",
+    finishLine: [
+      { Latitude: 36.5385000, Longitude: 140.2319167 },
+      { Latitude: 36.5384722, Longitude: 140.2323611 },
+    ],
+  },
+  {
+    id: "motegi_road",
+    name: "モビリティリゾートもてぎ ロードコース",
+    finishLine: [
+      { Latitude: 36.5330000, Longitude: 140.2266389 },
+      { Latitude: 36.5331389, Longitude: 140.2269444 },
+    ],
+  },
+];
+
 const detectLapsFromGps = (data) => {
   const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
   if (validGps.length < 50) return null;
+
+  // ─ CIRCUITS DB で既知サーキットを判定（精度優先）─
+  const cLat = validGps.reduce((a, r) => a + r.Latitude, 0) / validGps.length;
+  const cLon = validGps.reduce((a, r) => a + r.Longitude, 0) / validGps.length;
+  const haversineM = (la1, lo1, la2, lo2) => {
+    const R = 6371000, toR = x => x * Math.PI / 180;
+    const dLa = toR(la2-la1), dLo = toR(lo2-lo1);
+    const a = Math.sin(dLa/2)**2 + Math.cos(toR(la1))*Math.cos(toR(la2))*Math.sin(dLo/2)**2;
+    return 2*R*Math.asin(Math.sqrt(a));
+  };
+  let bestCircuit = null, bestDist = Infinity;
+  for (const c of CIRCUITS) {
+    const fLat = (c.finishLine[0].Latitude  + c.finishLine[1].Latitude)  / 2;
+    const fLon = (c.finishLine[0].Longitude + c.finishLine[1].Longitude) / 2;
+    const d = haversineM(cLat, cLon, fLat, fLon);
+    if (d < bestDist) { bestDist = d; bestCircuit = c; }
+  }
+  if (bestDist < 5000) {
+    const ref = {
+      Latitude:  (bestCircuit.finishLine[0].Latitude  + bestCircuit.finishLine[1].Latitude)  / 2,
+      Longitude: (bestCircuit.finishLine[0].Longitude + bestCircuit.finishLine[1].Longitude) / 2,
+      circuitName: bestCircuit.name,
+    };
+    applyLapsFromGpsRef(data, ref);
+    return ref;
+  }
+  // ─ 以下、既存の速度ベース検出（未知サーキット用フォールバック）─
+
 
   // Detect FIRST slow→fast transition. Position at that moment = pit exit area.
   const SLOW_T = 20, FAST_T = 40, WIN = 5;

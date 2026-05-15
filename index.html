@@ -1731,7 +1731,7 @@ function DroggerAnalyzer() {
           </div>
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
-          <input ref={fileInputRef} type="file" accept=".csv,.loga,text/csv,text/plain,application/vnd.ms-excel,application/csv" multiple className="hidden"
+          <input ref={fileInputRef} type="file" accept=".csv,.loga,text/plain,text/csv,application/octet-stream" multiple className="hidden"
             onChange={(e) => { if (e.target.files) handleFiles(e.target.files); }} />
           <button onClick={() => setAboutOpen(true)} className="p-2 text-gray-400 hover:text-yellow-400 active:text-yellow-400 transition" title="About / バージョン情報" style={{ touchAction: "manipulation" }}>
             <Info size={isMobile ? 20 : 18} />

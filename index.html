@@ -5,18 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Drogger // Telemetry — Endurance Analyzer</title>
 
-  <!-- Tailwind (JIT, supports arbitrary values like bg-[#111720]) -->
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!--
+    SECURITY: All CDN dependencies are pinned to specific versions AND verified
+    via Subresource Integrity (SRI) hashes to prevent supply-chain attacks
+    (Mini Shai-Hulud / Shai-Hulud worm precautions). If unpkg.com is ever
+    compromised or files are tampered with, the browser will refuse to execute
+    them due to hash mismatch.
+    Last audit: 2026-05-15.
+    Hash regeneration required when bumping any pinned version.
+  -->
 
-  <!-- React / ReactDOM -->
-  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <!-- Tailwind 3.4.17 (Play CDN — SRI not applicable, dynamic response) -->
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
 
-  <!-- PapaParse for CSV parsing -->
-  <script src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"></script>
+  <!-- React 18.3.1 / ReactDOM 18.3.1 (latest stable React 18) -->
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+          integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"></script>
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+          integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1"></script>
 
-  <!-- Babel for in-browser JSX compilation -->
-  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <!-- PapaParse 5.4.1 (CSV parsing) -->
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"
+          integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs"></script>
+
+  <!-- Babel Standalone 7.25.6 (in-browser JSX compilation) -->
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"
+          integrity="sha384-EIcs2MbARRLcLs7Gv2wqqhhfMlcLeW9yuJsWki1r5iveN1F5gpzHOwAKycJqSQOI"></script>
 
   <!-- Vercel Analytics (anonymous page view tracking) -->
   <script>
@@ -56,8 +74,30 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.5.8";
+const APP_VERSION = "1.6.0";
 const CHANGELOG = [
+  {
+    version: "1.6.0",
+    date: "2026-05-15",
+    notes: [
+      "**セキュリティ強化**：CDN 依存パッケージを全て特定バージョンに固定（react@18.3.1、@babel/standalone@7.25.6、tailwindcss@3.4.17 等）",
+      "**SRI（Subresource Integrity）ハッシュ追加**：unpkg.com 配信の全 JS ファイルに sha384 ハッシュを埋込み、CDN 改ざん攻撃を検出",
+      "Mini Shai-Hulud / Shai-Hulud worm 等のサプライチェーン攻撃に対する防御を実装",
+      "プロジェクト直下に vercel.json（CSP/HSTS/XFO 等セキュリティヘッダ）、.gitignore、SECURITY.md を追加",
+    ],
+  },
+  {
+    version: "1.5.9",
+    date: "2026-05-06",
+    notes: [
+      "**Lap Statistics Table**：Trackタブにラップごとの統計表を追加（チップ ⇔ テーブル切替トグル）",
+      "表示項目：ラップ#、タイム、ベスト差分、Max km/h、Avg km/h、Max RPM、A/F中央値、WOT%",
+      "各列のベスト値はレース界の慣例通り**グリーン**で強調（★マーク付きラップがベストラップ）",
+      "選択中ラップは黄色ハイライト（既存配色との整合性を維持）",
+      "Drogger アプリのラップリスト UI を参考にレイアウト設計（複数パラメータ横並び）",
+      "セクター機能は未実装（Drogger / aRacer ログにセクター情報がないため）",
+    ],
+  },
   {
     version: "1.5.8",
     date: "2026-05-06",
@@ -685,15 +725,216 @@ const recomputeLapsForSession = (session, newRef) => {
   return next;
 };
 
+// ─── Lap statistics helpers ───────────────────────────────────────
+// computeLapStats: aggregate per-lap metrics from sample data
+// findBests: identify the best value per column for green highlighting
+//   - duration: lowest wins (faster lap)
+//   - others: highest wins (more peak performance)
+// Per racing convention, BEST values are shown in GREEN.
+const computeLapStats = (lap, hasAfr, hasThrottle) => {
+  const samples = lap.samples;
+  if (!samples || samples.length === 0) return { lap: lap.lap, duration: lap.duration };
+
+  let maxSpeed = 0, sumSpeed = 0, speedN = 0;
+  let maxRpm = 0, sumRpm = 0, rpmN = 0;
+  let wotN = 0, tpsN = 0;
+  const afrValues = [];
+
+  for (const s of samples) {
+    if (s.Speed > 0) {
+      if (s.Speed > maxSpeed) maxSpeed = s.Speed;
+      sumSpeed += s.Speed; speedN++;
+    }
+    if (s.Rpm > 0) {
+      if (s.Rpm > maxRpm) maxRpm = s.Rpm;
+      sumRpm += s.Rpm; rpmN++;
+    }
+    if (hasAfr && s.Afr > 5 && s.Afr < 25) {
+      afrValues.push(s.Afr);
+    }
+    if (hasThrottle && s.ThrottolePos !== undefined) {
+      tpsN++;
+      if (s.ThrottolePos > 90) wotN++;
+    }
+  }
+  afrValues.sort((a, b) => a - b);
+
+  return {
+    lap:        lap.lap,
+    duration:   lap.duration,
+    maxSpeed:   speedN > 0 ? maxSpeed : null,
+    avgSpeed:   speedN > 0 ? sumSpeed / speedN : null,
+    maxRpm:     rpmN > 0 ? maxRpm : null,
+    avgRpm:     rpmN > 0 ? sumRpm / rpmN : null,
+    afrMedian:  afrValues.length > 0 ? afrValues[Math.floor(afrValues.length / 2)] : null,
+    wotPercent: tpsN > 0 ? (wotN / tpsN * 100) : null,
+    samples:    samples.length,
+  };
+};
+
+const findLapBests = (allStats) => {
+  const bests = {};
+  // Lower is better
+  for (const key of ["duration"]) {
+    const vals = allStats.map((s) => s[key]).filter((v) => v != null && !isNaN(v));
+    if (vals.length) bests[key] = Math.min(...vals);
+  }
+  // Higher is better
+  for (const key of ["maxSpeed", "avgSpeed", "maxRpm", "wotPercent"]) {
+    const vals = allStats.map((s) => s[key]).filter((v) => v != null && !isNaN(v));
+    if (vals.length) bests[key] = Math.max(...vals);
+  }
+  return bests;
+};
+
+// Format a delta in M:SS.fff or +S.fff format
+const fmtDelta = (sec) => {
+  if (sec == null || isNaN(sec)) return "—";
+  if (sec === 0) return "—";
+  const sign = sec > 0 ? "+" : "−";
+  const abs = Math.abs(sec);
+  if (abs >= 60) {
+    const m = Math.floor(abs / 60);
+    const s = (abs % 60).toFixed(3).padStart(6, "0");
+    return `${sign}${m}:${s}`;
+  }
+  return `${sign}${abs.toFixed(3)}`;
+};
+
+const BEST_GREEN = "#22c55e";
+
+// ─── Lap statistics table ─────────────────────────────────────────
+// Tabular view showing per-lap metrics with best-value highlighting.
+// Per racing convention, BEST values are GREEN. Currently selected lap
+// row gets the standard yellow accent highlight (consistent with chips).
+const LapTable = ({ laps, selectedLap, onSelectLap, hasAfr, hasThrottle, lookupRiderForLap, isMobile }) => {
+  const stats = React.useMemo(
+    () => laps.map((l) => computeLapStats(l, hasAfr, hasThrottle)),
+    [laps, hasAfr, hasThrottle]
+  );
+  const bests = React.useMemo(() => findLapBests(stats), [stats]);
+
+  // Show RPM column only if any lap has meaningful RPM data
+  const showRpm = stats.some((s) => s.maxRpm != null && s.maxRpm > 0);
+
+  const cellClass = (key, val) => {
+    if (val == null) return "text-gray-600";
+    if (bests[key] != null && val === bests[key]) return "font-bold";
+    return "text-gray-200";
+  };
+  const cellColor = (key, val) => {
+    if (val == null) return null;
+    if (bests[key] != null && val === bests[key]) return BEST_GREEN;
+    return null;
+  };
+
+  const headerCellStyle = {
+    background: PANEL_2,
+    color: FG_MUTE,
+    borderBottom: `1px solid ${STROKE}`,
+    padding: isMobile ? "8px 6px" : "6px 8px",
+    fontSize: isMobile ? 10 : 9,
+    fontFamily: "monospace",
+    textTransform: "uppercase",
+    letterSpacing: "0.1em",
+    fontWeight: 500,
+    whiteSpace: "nowrap",
+  };
+  const cellStyle = {
+    padding: isMobile ? "8px 6px" : "5px 8px",
+    fontSize: isMobile ? 11 : 10,
+    fontFamily: "monospace",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  };
+
+  return (
+    <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: isMobile ? 360 : 320 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+          <tr>
+            <th style={{ ...headerCellStyle, textAlign: "left", position: "sticky", left: 0, zIndex: 2 }}>Lap</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Time</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Δ Best</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Max km/h</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Avg km/h</th>
+            {showRpm && <th style={{ ...headerCellStyle, textAlign: "right" }}>Max RPM</th>}
+            {hasAfr     && <th style={{ ...headerCellStyle, textAlign: "right" }}>A/F med</th>}
+            {hasThrottle && <th style={{ ...headerCellStyle, textAlign: "right" }}>WOT%</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {stats.map((s) => {
+            const r = lookupRiderForLap(s.lap);
+            const isSelected = selectedLap === s.lap;
+            const isBest = bests.duration != null && s.duration === bests.duration;
+            const delta = bests.duration != null ? s.duration - bests.duration : null;
+            const rowBg = isSelected ? "rgba(250,204,21,0.12)" : "transparent";
+
+            return (
+              <tr key={s.lap}
+                  onClick={() => onSelectLap(s.lap)}
+                  className="cursor-pointer"
+                  style={{
+                    background: rowBg,
+                    borderBottom: `1px solid ${STROKE}`,
+                    borderLeft: isSelected ? `2px solid ${ACCENT}` : "2px solid transparent",
+                  }}
+                  onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = rowBg; }}>
+                <td style={{ ...cellStyle, position: "sticky", left: 0, background: isSelected ? "#1f2533" : PANEL, color: isSelected ? ACCENT : FG, fontWeight: isSelected ? 700 : 500, zIndex: 1 }}>
+                  <span className="inline-flex items-center gap-1.5">
+                    {r && <span className="w-1.5 h-1.5" style={{ background: r.color, display: "inline-block" }}></span>}
+                    {isBest && <span style={{ color: BEST_GREEN }}>★</span>}
+                    L{s.lap}
+                  </span>
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: cellColor("duration", s.duration) || FG }} className={cellClass("duration", s.duration)}>
+                  {fmtTime(s.duration)}
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: isBest ? BEST_GREEN : FG_MUTE, fontWeight: isBest ? 700 : 400 }}>
+                  {delta == null ? "—" : isBest ? "BEST" : `+${delta.toFixed(3)}`}
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: cellColor("maxSpeed", s.maxSpeed) || FG }} className={cellClass("maxSpeed", s.maxSpeed)}>
+                  {s.maxSpeed != null ? s.maxSpeed.toFixed(1) : "—"}
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: cellColor("avgSpeed", s.avgSpeed) || FG }} className={cellClass("avgSpeed", s.avgSpeed)}>
+                  {s.avgSpeed != null ? s.avgSpeed.toFixed(1) : "—"}
+                </td>
+                {showRpm && (
+                  <td style={{ ...cellStyle, textAlign: "right", color: cellColor("maxRpm", s.maxRpm) || FG }} className={cellClass("maxRpm", s.maxRpm)}>
+                    {s.maxRpm != null ? s.maxRpm.toFixed(0) : "—"}
+                  </td>
+                )}
+                {hasAfr && (
+                  <td style={{ ...cellStyle, textAlign: "right", color: FG }}>
+                    {s.afrMedian != null ? s.afrMedian.toFixed(2) : "—"}
+                  </td>
+                )}
+                {hasThrottle && (
+                  <td style={{ ...cellStyle, textAlign: "right", color: cellColor("wotPercent", s.wotPercent) || FG }} className={cellClass("wotPercent", s.wotPercent)}>
+                    {s.wotPercent != null ? s.wotPercent.toFixed(0) + "%" : "—"}
+                  </td>
+                )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
 // ─── UI primitives ───────────────────────────────────────────────
-const Panel = ({ title, accent, children, className = "" }) => (
+const Panel = ({ title, accent, children, className = "", actions = null }) => (
   <div className={`bg-[#111720] border border-[#252d3a] ${className}`} style={{ borderRadius: 2 }}>
     {title && (
-      <div className="px-3 py-2 border-b border-[#252d3a] flex items-center justify-between">
-        <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 flex items-center gap-2">
-          {accent && <span className="w-1 h-3" style={{ backgroundColor: ACCENT }}></span>}
-          {title}
+      <div className="px-3 py-2 border-b border-[#252d3a] flex items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 flex items-center gap-2 min-w-0">
+          {accent && <span className="w-1 h-3 flex-shrink-0" style={{ backgroundColor: ACCENT }}></span>}
+          <span className="truncate">{title}</span>
         </div>
+        {actions && <div className="flex-shrink-0">{actions}</div>}
       </div>
     )}
     {children}
@@ -1236,6 +1477,8 @@ function DroggerAnalyzer() {
   const [parseError, setParseError] = useState(null);
   // Lap line edit mode (manual override of auto-detected S/F position)
   const [lapLineEditMode, setLapLineEditMode] = useState(false);
+  // Lap selection view mode: "chips" (compact buttons) or "table" (full stats)
+  const [lapView, setLapView] = useState("table");
   // Playback (animation) state
   const [playbackProgress, setPlaybackProgress] = useState(0);   // 0-1
   const [isPlaying, setIsPlaying] = useState(false);
@@ -1723,20 +1966,51 @@ function DroggerAnalyzer() {
                 </>)}
 
                 {activeTab === "track" && (<>
-                  <Panel title="Lap Selection" accent>
-                    <div className={`p-3 flex flex-wrap gap-1.5 overflow-y-auto ${isMobile ? "max-h-40" : "max-h-32"}`}>
-                      {activeSession.laps.filter((l) => l.isRacing).map((l) => {
-                        const r = lookupRiderForLap(l.lap);
-                        return (
-                          <button key={l.lap} onClick={() => setSelectedLap(l.lap)}
-                            className={`font-mono border flex items-center gap-1.5 ${selectedLap === l.lap ? "border-yellow-400 bg-yellow-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-yellow-400"}`}
-                            style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
-                            {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
-                            <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                  <Panel title="Lap Selection" accent
+                    actions={
+                      <div className="flex items-center" style={{ border: `1px solid ${STROKE}`, borderRadius: 2 }}>
+                        {[
+                          { id: "chips",  label: "Chips" },
+                          { id: "table",  label: "Table" },
+                        ].map((v) => (
+                          <button key={v.id} onClick={() => setLapView(v.id)}
+                            className="font-mono uppercase tracking-wider transition"
+                            style={{
+                              background: lapView === v.id ? ACCENT : "transparent",
+                              color: lapView === v.id ? "#000" : FG_DIM,
+                              padding: "3px 8px",
+                              fontSize: 9,
+                            }}>
+                            {v.label}
                           </button>
-                        );
-                      })}
-                    </div>
+                        ))}
+                      </div>
+                    }>
+                    {lapView === "chips" ? (
+                      <div className={`p-3 flex flex-wrap gap-1.5 overflow-y-auto ${isMobile ? "max-h-40" : "max-h-32"}`}>
+                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
+                          const r = lookupRiderForLap(l.lap);
+                          return (
+                            <button key={l.lap} onClick={() => setSelectedLap(l.lap)}
+                              className={`font-mono border flex items-center gap-1.5 ${selectedLap === l.lap ? "border-yellow-400 bg-yellow-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-yellow-400"}`}
+                              style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
+                              {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <LapTable
+                        laps={activeSession.laps.filter((l) => l.isRacing)}
+                        selectedLap={selectedLap}
+                        onSelectLap={setSelectedLap}
+                        hasAfr={activeSession.hasAfr}
+                        hasThrottle={activeSession.hasThrottle}
+                        lookupRiderForLap={lookupRiderForLap}
+                        isMobile={isMobile}
+                      />
+                    )}
                   </Panel>
                   {selectedLapObj ? (<>
                     {/* Playback controls + telemetry readout */}

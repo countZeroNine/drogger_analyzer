@@ -1,0 +1,65 @@
+# ─── Security-sensitive files (per project rule) ───────────────
+# Setup / dev tooling artifacts that may contain credentials
+.claude/setup.mjs
+.vscode/setup.mjs
+
+# Any file with "token" or "secret" in the name (case-insensitive globs)
+**/*token*
+**/*Token*
+**/*TOKEN*
+**/*secret*
+**/*Secret*
+**/*SECRET*
+
+# Common credential file patterns
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+.env
+.env.*
+!.env.example
+
+# ─── Standard Node.js exclusions ───────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# ─── Build outputs ─────────────────────────────────────────────
+.next/
+.nuxt/
+dist/
+build/
+out/
+.turbo/
+.svelte-kit/
+
+# ─── Editor / IDE ──────────────────────────────────────────────
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.json.example
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ─── Vercel / deployment ───────────────────────────────────────
+.vercel
+.netlify
+
+# ─── Test / coverage ───────────────────────────────────────────
+coverage/
+.nyc_output/
+
+# ─── Misc ──────────────────────────────────────────────────────
+*.log
+.cache/
+.parcel-cache/
+.tmp/

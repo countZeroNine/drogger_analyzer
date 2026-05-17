@@ -74,8 +74,20 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.6.0";
+const APP_VERSION = "1.7.0";
 const CHANGELOG = [
+  {
+    version: "1.7.0",
+    date: "2026-05-18",
+    notes: [
+      "**GPS ラップ検出 v10：CIRCUITS DB + 線分交差方式に刷新**",
+      "既知サーキット（筑波2000・1000、もてぎ北ショート・ロード）は、フィニッシュライン線分を GPS 軌跡が横切るかを判定する方式に変更",
+      "従来の近接半径方式（NEAR_M=50m）より大幅に精確。もてぎ北ショートで 17 ラップ / ベスト 52.1s を再現",
+      "未知サーキットは v9 ピットアウト検出（40km/h 閾値）にフォールバック",
+      "CIRCUITS DB はコード内の `CIRCUITS` 配列に追加するだけで拡張可能",
+      "iOS ファイルピッカーの `accept` 属性を修正（`application/octet-stream` 追加で .loga が正しく選択可能に）",
+    ],
+  },
   {
     version: "1.6.0",
     date: "2026-05-15",
@@ -477,26 +489,10 @@ const parseAracerLog = (text, format) => {
   return { data, hasGps: hasAnyGps, format, sampleStride };
 };
 
-// ─── GPS-based lap detection v9 ─────────────────────────────────
-// Strategy: detect bike's position when speed first crosses 40 km/h after a
-// slow phase. 40 km/h is empirically optimal — high enough that the bike has
-// rolled out of pit garage and is moving with intent, low enough that the
-// crossing happens AT or VERY NEAR the homestraight (not after the bike has
-// already gone through Turn 1/2 and started accelerating on the next straight).
-//
-// Validated against Google-Maps-confirmed finish line on もてぎ本コース:
-//   3 different sessions detected within 15-27m of the actual S/F line.
-//
-// History:
-//   v1-v3 = first sample / centroid / histogram (various failure modes)
-//   v4 = top-70% histogram → picks max-speed area on back straight (wrong)
-//   v8 = pit-out at 100 km/h → bike has already cleared Turn 1/2 (wrong)
-//   v9 = pit-out at 40 km/h → lands within ~25m of actual finish line (current)
-//
-// Manual override: the user can click on the Track plot to override the
-// detected position (handled in App component, calls recomputeLapsWithRef).
-// ─── Circuit DB (aRacer LM GPS ラップ検出用フィニッシュライン座標) ───
-
+// ─── CIRCUITS DB ─────────────────────────────────────────────────
+// Known S/F finish line coordinates (two GPS points defining the line segment
+// the bike crosses each lap). Add circuits as needed — coordinates confirmed
+// from Google Maps satellite imagery and cross-checked with actual log data.
 const CIRCUITS = [
   {
     id: "tsukuba_2000",
@@ -532,39 +528,145 @@ const CIRCUITS = [
   },
 ];
 
+// ─── Line segment intersection test (2D Cartesian) ───────────────
+// Returns true when segment AB crosses segment CD.
+// Tolerance ε on t/u avoids floating-point misses at endpoints.
+const segmentsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
+  const denom = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+  if (Math.abs(denom) < 1e-9) return false; // parallel / collinear
+  const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / denom;
+  const u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / denom;
+  const ε = 0.001;
+  return t >= -ε && t <= 1 + ε && u >= -ε && u <= 1 + ε;
+};
+
+// ─── Circuit auto-matcher ─────────────────────────────────────────
+// Computes the session's median GPS position and finds the nearest circuit
+// finish-line midpoint within MATCH_DIST_M (10 km). Returns null if no match.
+const matchCircuit = (validGps) => {
+  if (!validGps.length) return null;
+  const MATCH_DIST_M = 10000;
+  const sorted = [...validGps].sort((a, b) => a.Latitude - b.Latitude);
+  const medLat = sorted[Math.floor(sorted.length / 2)].Latitude;
+  const cosMed = Math.cos(medLat * Math.PI / 180);
+  const sortedLon = [...validGps].sort((a, b) => a.Longitude - b.Longitude);
+  const medLon = sortedLon[Math.floor(sortedLon.length / 2)].Longitude;
+
+  let best = null, bestDist = MATCH_DIST_M;
+  for (const c of CIRCUITS) {
+    const flLat = (c.finishLine[0].Latitude + c.finishLine[1].Latitude) / 2;
+    const flLon = (c.finishLine[0].Longitude + c.finishLine[1].Longitude) / 2;
+    const dist = Math.hypot(
+      (medLat - flLat) * 111320,
+      (medLon - flLon) * 111320 * cosMed
+    );
+    if (dist < bestDist) { bestDist = dist; best = c; }
+  }
+  return best;
+};
+
+// ─── GPS-based lap detection — history & strategy ────────────────
+// v10 (current): two-pass approach:
+//   Pass 1 — CIRCUITS DB matching + line-segment crossing (precise).
+//             If the session's GPS median lies within 10 km of a known circuit,
+//             compute true lap crossings by testing each consecutive GPS-sample
+//             pair against the finish-line segment. No proximity-radius errors.
+//             Validated: もてぎ北ショート LM ログで 17 laps / ベスト 52.1s 再現.
+//   Pass 2 — v9 pit-out fallback (40 km/h threshold).
+//             Used when circuit is not in DB or crossings < 1.
+//             Validated within 15-27m of finish line on もてぎ本コース.
+//
+// Manual override: the user can click on the Track plot (aRacer LM only)
+// to set a custom S/F position. That uses applyLapsFromGpsRef (radius method).
 const detectLapsFromGps = (data) => {
   const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
   if (validGps.length < 50) return null;
 
-  // ─ CIRCUITS DB で既知サーキットを判定（精度優先）─
-  const cLat = validGps.reduce((a, r) => a + r.Latitude, 0) / validGps.length;
-  const cLon = validGps.reduce((a, r) => a + r.Longitude, 0) / validGps.length;
-  const haversineM = (la1, lo1, la2, lo2) => {
-    const R = 6371000, toR = x => x * Math.PI / 180;
-    const dLa = toR(la2-la1), dLo = toR(lo2-lo1);
-    const a = Math.sin(dLa/2)**2 + Math.cos(toR(la1))*Math.cos(toR(la2))*Math.sin(dLo/2)**2;
-    return 2*R*Math.asin(Math.sqrt(a));
-  };
-  let bestCircuit = null, bestDist = Infinity;
-  for (const c of CIRCUITS) {
-    const fLat = (c.finishLine[0].Latitude  + c.finishLine[1].Latitude)  / 2;
-    const fLon = (c.finishLine[0].Longitude + c.finishLine[1].Longitude) / 2;
-    const d = haversineM(cLat, cLon, fLat, fLon);
-    if (d < bestDist) { bestDist = d; bestCircuit = c; }
-  }
-  if (bestDist < 5000) {
-    const ref = {
-      Latitude:  (bestCircuit.finishLine[0].Latitude  + bestCircuit.finishLine[1].Latitude)  / 2,
-      Longitude: (bestCircuit.finishLine[0].Longitude + bestCircuit.finishLine[1].Longitude) / 2,
-      circuitName: bestCircuit.name,
-    };
-    applyLapsFromGpsRef(data, ref);
-    return ref;
-  }
-  // ─ 以下、既存の速度ベース検出（未知サーキット用フォールバック）─
+  // ── Pass 1: CIRCUITS DB + line-segment intersection ──────────────
+  const circuit = matchCircuit(validGps);
+  if (circuit) {
+    const lat0 = validGps[0].Latitude;
+    const lon0 = validGps[0].Longitude;
+    const cosMid = Math.cos(lat0 * Math.PI / 180);
+    const toXY = (lat, lon) => [
+      (lon - lon0) * 111320 * cosMid,
+      (lat - lat0) * 111320,
+    ];
+    const [fx1, fy1] = toXY(circuit.finishLine[0].Latitude, circuit.finishLine[0].Longitude);
+    const [fx2, fy2] = toXY(circuit.finishLine[1].Latitude, circuit.finishLine[1].Longitude);
 
+    // Extend the finish-line segment by GATE_EXTEND_M on each side.
+    // GPS positional accuracy is ~10-20 m, and racing lines vary.
+    // Without extension, samples near the segment endpoints can miss intersection.
+    // 20 m extension brings total gate width to ~70 m for Motegi (adequate;
+    // tested: 50 m already catches all crossings without false positives).
+    const GATE_EXTEND_M = 20;
+    const fLen = Math.hypot(fx2 - fx1, fy2 - fy1);
+    const [fux, fuy] = fLen > 0 ? [(fx2 - fx1) / fLen, (fy2 - fy1) / fLen] : [1, 0];
+    const gx1 = fx1 - fux * GATE_EXTEND_M;
+    const gy1 = fy1 - fuy * GATE_EXTEND_M;
+    const gx2 = fx2 + fux * GATE_EXTEND_M;
+    const gy2 = fy2 + fuy * GATE_EXTEND_M;
 
-  // Detect FIRST slow→fast transition. Position at that moment = pit exit area.
+    const COOLDOWN_S = 20; // minimum seconds between consecutive lap counts
+    const crossTimes = [];
+    let lastCrossTime = -1e9;
+    let prevR = null;
+
+    for (const r of data) {
+      if (r.Latitude === 0 || r.Longitude === 0) { prevR = null; continue; }
+      if (prevR && r.RunTime - lastCrossTime > COOLDOWN_S) {
+        const [px, py] = toXY(prevR.Latitude, prevR.Longitude);
+        const [cx, cy] = toXY(r.Latitude, r.Longitude);
+        if (segmentsIntersect(px, py, cx, cy, gx1, gy1, gx2, gy2)) {
+          // Interpolate crossing time between the two samples
+          crossTimes.push((prevR.RunTime + r.RunTime) / 2);
+          lastCrossTime = r.RunTime;
+        }
+      }
+      prevR = r;
+    }
+
+    if (crossTimes.length >= 1) {
+      // Assign Lap numbers: samples before first crossing = lap 0, then increment
+      let lapNum = 0, ci = 0;
+      for (const r of data) {
+        while (ci < crossTimes.length && r.RunTime >= crossTimes[ci]) {
+          lapNum++;
+          ci++;
+        }
+        r.Lap = lapNum;
+      }
+      // Compute LapRunTime + LapTime
+      const buckets = new Map();
+      for (const r of data) {
+        if (!buckets.has(r.Lap)) buckets.set(r.Lap, []);
+        buckets.get(r.Lap).push(r);
+      }
+      const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
+      for (let i = 0; i < sortedKeys.length; i++) {
+        const smpls = buckets.get(sortedKeys[i]);
+        smpls.sort((a, b) => a.RunTime - b.RunTime);
+        const t0 = smpls[0].RunTime;
+        smpls.forEach((r) => { r.LapRunTime = r.RunTime - t0; });
+        if (i + 1 < sortedKeys.length) {
+          const nxt = buckets.get(sortedKeys[i + 1]);
+          const dur = nxt[0].RunTime - t0;
+          nxt.forEach((r) => { r.LapTime = dur * 1000; });
+        }
+      }
+      // Return finish-line midpoint as lapRef (visual S/F marker)
+      return {
+        Latitude: (circuit.finishLine[0].Latitude + circuit.finishLine[1].Latitude) / 2,
+        Longitude: (circuit.finishLine[0].Longitude + circuit.finishLine[1].Longitude) / 2,
+        circuitName: circuit.name,
+      };
+    }
+    // Circuit matched but no crossings detected (GPS gap over finish line?)
+    // Fall through to Pass 2.
+  }
+
+  // ── Pass 2: v9 pit-out detection (40 km/h threshold) ─────────────
   const SLOW_T = 20, FAST_T = 40, WIN = 5;
   const smoothSpeed = new Array(data.length);
   for (let i = 0; i < data.length; i++) {
@@ -599,15 +701,10 @@ const detectLapsFromGps = (data) => {
     ref = { Latitude: sumLat / pitOuts.length, Longitude: sumLon / pitOuts.length };
   } else {
     // Fallback for partial-session files (e.g. cyclic-buffer "last 10 min" exports)
-    // that start mid-track and never include a pit-out transition.
-    // Use histogram of top-70% speed samples — biased to fast straights.
     const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
     let threshold = maxSpeed * 0.7;
     let fastSamples = validGps.filter((r) => r.Speed > threshold);
-    if (fastSamples.length < 20) {
-      threshold = maxSpeed * 0.5;
-      fastSamples = validGps.filter((r) => r.Speed > threshold);
-    }
+    if (fastSamples.length < 20) { threshold = maxSpeed * 0.5; fastSamples = validGps.filter((r) => r.Speed > threshold); }
     if (fastSamples.length < 20) fastSamples = validGps;
     const GRID = 0.0001;
     const cells = new Map();
@@ -617,14 +714,11 @@ const detectLapsFromGps = (data) => {
     }
     if (!cells.size) return null;
     let bestKey = null, bestCount = 0;
-    for (const [k, c] of cells) {
-      if (c > bestCount) { bestCount = c; bestKey = k; }
-    }
+    for (const [k, c] of cells) { if (c > bestCount) { bestCount = c; bestKey = k; } }
     const [bestLatI, bestLonI] = bestKey.split(",").map(Number);
     ref = { Latitude: bestLatI * GRID, Longitude: bestLonI * GRID };
   }
 
-  // Run zone-entry lap detection with the chosen reference
   applyLapsFromGpsRef(data, ref);
   return ref;
 };

@@ -74,11 +74,19 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.2";
+const APP_VERSION = "1.7.3";
 const CHANGELOG = [
   {
+    version: "1.7.3",
+    date: "2026-06-03",
+    notes: [
+      "Track タブのレイアウト変更：Telemetry vs distance チャートを GPS トラックマップの上に移動",
+      "再生後の確認フロー：データ（Speed/RPM/TPS/AFR の時系列）→ コース上の位置、という順序に",
+    ],
+  },
+  {
     version: "1.7.2",
-    date: "2026-05-18",
+    date: "2026-06-03",
     notes: [
       "「Telemetry vs distance」グラフに TPS（スロットル開度）ラインを追加（オレンジ #f97316）",
       "TPS スケールは 0-100% 固定（Speed・RPM の様に自動スケールはしない）",
@@ -89,7 +97,7 @@ const CHANGELOG = [
   },
   {
     version: "1.7.1",
-    date: "2026-05-18",
+    date: "2026-06-03",
     notes: [
       "再生中リアルタイム読み出しに TPS（スロットル開度）・Gear（ギア段数）・Lean（リーン角）を追加",
       "データを持つソース（aRacer LM のみ）では自動的に表示、Drogger など該当チャンネルがない場合は非表示",
@@ -2244,6 +2252,16 @@ function DroggerAnalyzer() {
                       </div>
                     </Panel>
 
+                    {/* Unified telemetry trace */}
+                    <Panel title={`Telemetry — Speed / RPM${activeSession.hasAfr ? " / A/F" : ""}${activeSession.hasThrottle ? " / TPS" : ""} vs distance`} accent>
+                      <div className="p-2">
+                        <MultiTracePlot lapA={selectedLapObj}
+                          cursorSampleA={refCursor}
+                          hasAfr={activeSession.hasAfr} hasThrottle={activeSession.hasThrottle} isMobile={isMobile}
+                          height={isMobile ? 300 : 340} />
+                      </div>
+                    </Panel>
+
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
                       <Panel title={`Track — Lap ${selectedLapObj.lap} (speed)`} accent>
                         {activeSession.lapRef && (
@@ -2273,15 +2291,6 @@ function DroggerAnalyzer() {
                         <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="afr" engineType={activeSession.engineType} cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
                       </Panel>
                     )}
-                    {/* Unified telemetry trace */}
-                    <Panel title={`Telemetry — Speed / RPM${activeSession.hasAfr ? " / A/F" : ""}${activeSession.hasThrottle ? " / TPS" : ""} vs distance`} accent>
-                      <div className="p-2">
-                        <MultiTracePlot lapA={selectedLapObj}
-                          cursorSampleA={refCursor}
-                          hasAfr={activeSession.hasAfr} hasThrottle={activeSession.hasThrottle} isMobile={isMobile}
-                          height={isMobile ? 300 : 340} />
-                      </div>
-                    </Panel>
                     <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-5"}`}>
                       <Panel className="p-3">
                         <div className="text-[9px] uppercase tracking-[0.15em] font-mono text-gray-500 mb-0.5">Rider</div>

@@ -74,8 +74,18 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "1.7.1";
 const CHANGELOG = [
+  {
+    version: "1.7.1",
+    date: "2026-05-18",
+    notes: [
+      "再生中リアルタイム読み出しに TPS（スロットル開度）・Gear（ギア段数）・Lean（リーン角）を追加",
+      "データを持つソース（aRacer LM のみ）では自動的に表示、Drogger など該当チャンネルがない場合は非表示",
+      "Track タブ・Compare タブ両方の readout グリッドに適用",
+      "aRacer パーサーの sample オブジェクトに GearNum・LeanAngle を追加（これまで idx で検出していたが sample に保存されていなかったバグを修正）",
+    ],
+  },
   {
     version: "1.7.0",
     date: "2026-05-18",
@@ -480,6 +490,8 @@ const parseAracerLog = (text, format) => {
       Afr:          num(idx.Afr),
       ThrottolePos: num(idx.ThrottolePos),
       Voltage:      num(idx.Voltage),
+      GearNum:      intNum(idx.GearNum),
+      LeanAngle:    num(idx.LeanAngle),
       Latitude:     lat,
       Longitude:    lon,
       Front: 0, Rear: 0, T1: 0, T2: 0, T3: 0, RearSpeed: 0, accuracy: 0,
@@ -858,6 +870,8 @@ const parseSession = (rawData, name, type, options = {}) => {
     totalSamples: rawData.length,
     hasAfr: rawData.some((r) => r.Afr && r.Afr > 0),
     hasThrottle: rawData.some((r) => r.ThrottolePos && r.ThrottolePos > 0),
+    hasGear: rawData.some((r) => r.GearNum && r.GearNum > 0),
+    hasLeanAngle: rawData.some((r) => r.LeanAngle && Math.abs(r.LeanAngle) > 0.1),
     duration: rawData[rawData.length - 1].RunTime - rawData[0].RunTime,
   };
 };
@@ -2192,12 +2206,22 @@ function DroggerAnalyzer() {
                           {[0.25, 0.5, 1, 2, 4].map((v) => (<option key={v} value={v}>{v}×</option>))}
                         </select>
                       </div>
-                      <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: `3px solid ${ACCENT}` }}>
+                      <div className={`grid gap-3 p-3`}
+                           style={{ borderLeft: `3px solid ${ACCENT}`, gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))" }}>
                             <Stat label="Time" value={fmtTime(elapsedSec)} />
                         <Stat label="Speed" value={fmtNum(refCursor?.Speed ?? 0, 1)} unit="km/h" />
                         <Stat label="RPM" value={(refCursor?.Rpm ?? 0).toFixed(0)} unit="rpm" />
                         {activeSession.hasAfr && (
                           <Stat label="A/F" value={fmtNum(refCursor?.Afr ?? 0, 2)} />
+                        )}
+                        {activeSession.hasThrottle && (
+                          <Stat label="TPS" value={fmtNum(refCursor?.ThrottolePos ?? 0, 1)} unit="%" />
+                        )}
+                        {activeSession.hasGear && (
+                          <Stat label="Gear" value={refCursor?.GearNum > 0 ? String(refCursor.GearNum) : "N"} />
+                        )}
+                        {activeSession.hasLeanAngle && (
+                          <Stat label="Lean" value={fmtNum(Math.abs(refCursor?.LeanAngle ?? 0), 1)} unit="°" />
                         )}
                       </div>
                     </Panel>
@@ -2314,21 +2338,39 @@ function DroggerAnalyzer() {
                         </select>
                       </div>
                       <div className={`grid gap-0 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
-                        <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: `3px solid ${ACCENT}` }}>
+                        <div className="grid gap-3 p-3" style={{ borderLeft: `3px solid ${ACCENT}`, gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))" }}>
                               <Stat label={`Lap ${selectedLapObj.lap} · time`} value={fmtTime(refElapsedDisplay)} />
                           <Stat label="Speed" value={fmtNum(refCursor?.Speed ?? 0, 1)} unit="km/h" />
                           <Stat label="RPM" value={(refCursor?.Rpm ?? 0).toFixed(0)} />
                           {activeSession.hasAfr && (
                             <Stat label="A/F" value={fmtNum(refCursor?.Afr ?? 0, 2)} />
                           )}
+                          {activeSession.hasThrottle && (
+                            <Stat label="TPS" value={fmtNum(refCursor?.ThrottolePos ?? 0, 1)} unit="%" />
+                          )}
+                          {activeSession.hasGear && (
+                            <Stat label="Gear" value={refCursor?.GearNum > 0 ? String(refCursor.GearNum) : "N"} />
+                          )}
+                          {activeSession.hasLeanAngle && (
+                            <Stat label="Lean" value={fmtNum(Math.abs(refCursor?.LeanAngle ?? 0), 1)} unit="°" />
+                          )}
                         </div>
                         {compareLapObj ? (
-                          <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: "3px solid #22d3ee" }}>
+                          <div className="grid gap-3 p-3" style={{ borderLeft: "3px solid #22d3ee", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))" }}>
                             <Stat label={`Lap ${compareLapObj.lap} · time`} value={fmtTime(cmpElapsedDisplay)} />
                             <Stat label="Speed" value={fmtNum(cmpCursor?.Speed ?? 0, 1)} unit="km/h" />
                             <Stat label="RPM" value={(cmpCursor?.Rpm ?? 0).toFixed(0)} />
                             {activeSession.hasAfr && (
                               <Stat label="A/F" value={fmtNum(cmpCursor?.Afr ?? 0, 2)} />
+                            )}
+                            {activeSession.hasThrottle && (
+                              <Stat label="TPS" value={fmtNum(cmpCursor?.ThrottolePos ?? 0, 1)} unit="%" />
+                            )}
+                            {activeSession.hasGear && (
+                              <Stat label="Gear" value={cmpCursor?.GearNum > 0 ? String(cmpCursor.GearNum) : "N"} />
+                            )}
+                            {activeSession.hasLeanAngle && (
+                              <Stat label="Lean" value={fmtNum(Math.abs(cmpCursor?.LeanAngle ?? 0), 1)} unit="°" />
                             )}
                           </div>
                         ) : (

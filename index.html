@@ -74,8 +74,19 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.1";
+const APP_VERSION = "1.7.2";
 const CHANGELOG = [
+  {
+    version: "1.7.2",
+    date: "2026-05-18",
+    notes: [
+      "「Telemetry vs distance」グラフに TPS（スロットル開度）ラインを追加（オレンジ #f97316）",
+      "TPS スケールは 0-100% 固定（Speed・RPM の様に自動スケールはしない）",
+      "データを持つソースのみ表示（aRacer LM/ECU 等）。Drogger CSV は TPS カラム有無で自動判定",
+      "パネルタイトルがデータ内容に応じて動的に変更（例: 'Speed / RPM / A/F / TPS vs distance'）",
+      "Track タブ・Compare タブ両方に適用",
+    ],
+  },
   {
     version: "1.7.1",
     date: "2026-05-18",
@@ -1402,16 +1413,17 @@ const TracePlot = ({ lapA, lapB, mode = "speed", height = 280, label, cursorSamp
   );
 };
 
-// ─── Multi-metric trace plot (Speed + RPM + A/F unified) ────────
-// Drogger-style: shared distance axis, 3 metrics overlaid with their own scales,
+// ─── Multi-metric trace plot (Speed + RPM + A/F + TPS unified) ────────
+// Drogger-style: shared distance axis, metrics overlaid with their own scales,
 // color-coded. Reference lap solid, compare lap dashed.
 const MULTI_METRICS = [
-  { key: "Speed", short: "SPD", label: "km/h", color: "#facc15", fmt: (v) => v.toFixed(1) },
-  { key: "Rpm",   short: "RPM", label: "rpm",  color: "#22d3ee", fmt: (v) => v.toFixed(0) },
-  { key: "Afr",   short: "A/F", label: "",     color: "#84cc16", fmt: (v) => v.toFixed(2) },
+  { key: "Speed",        short: "SPD", label: "km/h", color: "#facc15", fmt: (v) => v.toFixed(1) },
+  { key: "Rpm",          short: "RPM", label: "rpm",  color: "#22d3ee", fmt: (v) => v.toFixed(0) },
+  { key: "Afr",          short: "A/F", label: "",     color: "#84cc16", fmt: (v) => v.toFixed(2) },
+  { key: "ThrottolePos", short: "TPS", label: "%",    color: "#f97316", fmt: (v) => v.toFixed(0) },
 ];
 
-const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB = null, hasAfr = false, height = 360, isMobile = false }) => {
+const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB = null, hasAfr = false, hasThrottle = false, height = 360, isMobile = false }) => {
   if (!lapA) return null;
   const w = 800, h = height, pad = { l: 12, r: 12, t: 38, b: 28 };
 
@@ -1428,7 +1440,7 @@ const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB
         }
         lastLat = s.Latitude; lastLon = s.Longitude;
       }
-      return { d, Speed: s.Speed, Rpm: s.Rpm, Afr: s.Afr };
+      return { d, Speed: s.Speed, Rpm: s.Rpm, Afr: s.Afr, ThrottolePos: s.ThrottolePos ?? 0 };
     });
   };
 
@@ -1438,10 +1450,15 @@ const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB
   const dMax = Math.max(...allD) || 1;
   const sx = (d) => pad.l + (d / dMax) * (w - pad.l - pad.r);
 
-  const metrics = MULTI_METRICS.filter((m) => m.key !== "Afr" || hasAfr);
+  const metrics = MULTI_METRICS.filter((m) => {
+    if (m.key === "Afr")          return hasAfr;
+    if (m.key === "ThrottolePos") return hasThrottle;
+    return true;
+  });
   const scales = metrics.map((m) => {
     let min, max;
     if (m.key === "Afr") { min = AFR_MIN; max = AFR_MAX; }
+    else if (m.key === "ThrottolePos") { min = 0; max = 100; } // TPS always 0-100%
     else if (m.key === "Speed") {
       const allVals = [...a.map((p) => p.Speed), ...(b ? b.map((p) => p.Speed) : [])];
       min = 0; max = Math.max(Math.max(...allVals) * 1.05, 50);
@@ -1474,8 +1491,9 @@ const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB
       {scales.map((scale, i) => {
         const cx = pad.l + i * chipWidth;
         const fmtRange = (() => {
-          if (scale.key === "Afr") return `${scale.min.toFixed(1)}-${scale.max.toFixed(1)}`;
-          if (scale.key === "Rpm") return `0-${(scale.max / 1000).toFixed(1)}k`;
+          if (scale.key === "Afr")          return `${scale.min.toFixed(1)}-${scale.max.toFixed(1)}`;
+          if (scale.key === "Rpm")          return `0-${(scale.max / 1000).toFixed(1)}k`;
+          if (scale.key === "ThrottolePos") return `0-100`;
           return `0-${scale.max.toFixed(0)}`;
         })();
         return (
@@ -2256,11 +2274,11 @@ function DroggerAnalyzer() {
                       </Panel>
                     )}
                     {/* Unified telemetry trace */}
-                    <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
+                    <Panel title={`Telemetry — Speed / RPM${activeSession.hasAfr ? " / A/F" : ""}${activeSession.hasThrottle ? " / TPS" : ""} vs distance`} accent>
                       <div className="p-2">
                         <MultiTracePlot lapA={selectedLapObj}
                           cursorSampleA={refCursor}
-                          hasAfr={activeSession.hasAfr} isMobile={isMobile}
+                          hasAfr={activeSession.hasAfr} hasThrottle={activeSession.hasThrottle} isMobile={isMobile}
                           height={isMobile ? 300 : 340} />
                       </div>
                     </Panel>
@@ -2385,11 +2403,11 @@ function DroggerAnalyzer() {
                       <TrackPlot lap={selectedLapObj} overlay={compareLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0}
                         cursorSample={refCursor} overlayCursorSample={cmpCursor} lapRef={activeSession.lapRef} height={isMobile ? 360 : 380} />
                     </Panel>
-                    <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
+                    <Panel title={`Telemetry — Speed / RPM${activeSession.hasAfr ? " / A/F" : ""}${activeSession.hasThrottle ? " / TPS" : ""} vs distance`} accent>
                       <div className="p-2">
                         <MultiTracePlot lapA={selectedLapObj} lapB={compareLapObj}
                           cursorSampleA={refCursor} cursorSampleB={cmpCursor}
-                          hasAfr={activeSession.hasAfr} isMobile={isMobile}
+                          hasAfr={activeSession.hasAfr} hasThrottle={activeSession.hasThrottle} isMobile={isMobile}
                           height={isMobile ? 320 : 360} />
                       </div>
                     </Panel>

@@ -1,0 +1,2771 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Drogger // Telemetry — Endurance Analyzer</title>
+
+  <!--
+    SECURITY: All CDN dependencies are pinned to specific versions AND verified
+    via Subresource Integrity (SRI) hashes to prevent supply-chain attacks
+    (Mini Shai-Hulud / Shai-Hulud worm precautions). If unpkg.com is ever
+    compromised or files are tampered with, the browser will refuse to execute
+    them due to hash mismatch.
+    Last audit: 2026-05-15.
+    Hash regeneration required when bumping any pinned version.
+  -->
+
+  <!-- Tailwind 3.4.17 (Play CDN — SRI not applicable, dynamic response) -->
+  <script src="https://cdn.tailwindcss.com/3.4.17"></script>
+
+  <!-- React 18.3.1 / ReactDOM 18.3.1 (latest stable React 18) -->
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/react@18.3.1/umd/react.production.min.js"
+          integrity="sha384-DGyLxAyjq0f9SPpVevD6IgztCFlnMF6oW/XQGmfe+IsZ8TqEiDrcHkMLKI6fiB/Z"></script>
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.production.min.js"
+          integrity="sha384-gTGxhz21lVGYNMcdJOyq01Edg0jhn/c22nsx0kyqP0TxaV5WVdsSH1fSDUf5YJj1"></script>
+
+  <!-- PapaParse 5.4.1 (CSV parsing) -->
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/papaparse@5.4.1/papaparse.min.js"
+          integrity="sha384-D/t0ZMqQW31H3az8ktEiNb39wyKnS82iFY52QPACM+IjKW3jDUhyIgh2PApRqJZs"></script>
+
+  <!-- Babel Standalone 7.25.6 (in-browser JSX compilation) -->
+  <script crossorigin="anonymous"
+          src="https://unpkg.com/@babel/standalone@7.25.6/babel.min.js"
+          integrity="sha384-EIcs2MbARRLcLs7Gv2wqqhhfMlcLeW9yuJsWki1r5iveN1F5gpzHOwAKycJqSQOI"></script>
+
+  <!-- Vercel Analytics (anonymous page view tracking) -->
+  <script>
+    window.va = window.va || function () { (window.vaq = window.vaq || []).push(arguments); };
+  </script>
+  <script defer src="/_vercel/insights/script.js"></script>
+
+  <style>
+    html, body { margin: 0; padding: 0; background: #0a0e14; }
+    ::-webkit-scrollbar { width: 8px; height: 8px; }
+    ::-webkit-scrollbar-track { background: #0a0e14; }
+    ::-webkit-scrollbar-thumb { background: #252d3a; }
+    ::-webkit-scrollbar-thumb:hover { background: #facc15; }
+    select option { background: #0a0e14; color: #e5e7eb; }
+    /* Loader shown until the React app boots */
+    #loader { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+              color: #6b7280; font-family: ui-monospace, monospace; font-size: 11px; letter-spacing: 0.18em;
+              text-transform: uppercase; }
+  </style>
+</head>
+<body>
+  <div id="loader">Booting Telemetry…</div>
+  <div id="root"></div>
+
+  <script type="text/babel" data-presets="react">
+const { useState, useMemo, useRef, useCallback, useEffect } = React;
+
+// ─── Aesthetic constants ─────────────────────────────────────────
+const ACCENT = "#facc15";
+const FG = "#e5e7eb";
+const FG_DIM = "#9ca3af";
+const FG_MUTE = "#6b7280";
+const BG = "#0a0e14";
+const PANEL = "#111720";
+const PANEL_2 = "#1a212c";
+const STROKE = "#252d3a";
+const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
+
+// ─── App version & changelog ─────────────────────────────────────
+const APP_VERSION = "1.7.1";
+const CHANGELOG = [
+  {
+    version: "1.7.1",
+    date: "2026-07-11",
+    notes: [
+      "**修正：aRacer .loga でラップが1本も表示されない問題（IR計測が生きているログ）**",
+      "Drogger専用の LapTime 規約（ms・次ラップ先頭格納）を aRacer IR_LapTime に誤適用していた。IR_LapTime は非公開の内部tick単位（90秒ラップで約2.0e7・レート非一定）のため ms 解釈で1ラップ約19,900秒となり全ラップが有効範囲外に",
+      "aRacer 系ソースは常に RunTime 差分でラップタイムを算出するよう変更（Drogger CSV の挙動は不変）",
+      "6/24以前のログで発症しなかったのは IR_LapTime が全行 0 でフォールバックに落ちていたため。7/11 の S/F ライン再作成成功で IR 計測が復活し顕在化",
+    ],
+  },
+  {
+    version: "1.7.0",
+    date: "2026-05-18",
+    notes: [
+      "**GPS ラップ検出 v10：CIRCUITS DB + 線分交差方式に刷新**",
+      "既知サーキット（筑波2000・1000、もてぎ北ショート・ロード）は、フィニッシュライン線分を GPS 軌跡が横切るかを判定する方式に変更",
+      "従来の近接半径方式（NEAR_M=50m）より大幅に精確。もてぎ北ショートで 17 ラップ / ベスト 52.1s を再現",
+      "未知サーキットは v9 ピットアウト検出（40km/h 閾値）にフォールバック",
+      "CIRCUITS DB はコード内の `CIRCUITS` 配列に追加するだけで拡張可能",
+      "iOS ファイルピッカーの `accept` 属性を修正（`application/octet-stream` 追加で .loga が正しく選択可能に）",
+    ],
+  },
+  {
+    version: "1.6.0",
+    date: "2026-05-15",
+    notes: [
+      "**セキュリティ強化**：CDN 依存パッケージを全て特定バージョンに固定（react@18.3.1、@babel/standalone@7.25.6、tailwindcss@3.4.17 等）",
+      "**SRI（Subresource Integrity）ハッシュ追加**：unpkg.com 配信の全 JS ファイルに sha384 ハッシュを埋込み、CDN 改ざん攻撃を検出",
+      "Mini Shai-Hulud / Shai-Hulud worm 等のサプライチェーン攻撃に対する防御を実装",
+      "プロジェクト直下に vercel.json（CSP/HSTS/XFO 等セキュリティヘッダ）、.gitignore、SECURITY.md を追加",
+    ],
+  },
+  {
+    version: "1.5.9",
+    date: "2026-05-06",
+    notes: [
+      "**Lap Statistics Table**：Trackタブにラップごとの統計表を追加（チップ ⇔ テーブル切替トグル）",
+      "表示項目：ラップ#、タイム、ベスト差分、Max km/h、Avg km/h、Max RPM、A/F中央値、WOT%",
+      "各列のベスト値はレース界の慣例通り**グリーン**で強調（★マーク付きラップがベストラップ）",
+      "選択中ラップは黄色ハイライト（既存配色との整合性を維持）",
+      "Drogger アプリのラップリスト UI を参考にレイアウト設計（複数パラメータ横並び）",
+      "セクター機能は未実装（Drogger / aRacer ログにセクター情報がないため）",
+    ],
+  },
+  {
+    version: "1.5.8",
+    date: "2026-05-06",
+    notes: [
+      "S/Fマーカー・編集UIをaRacer LMセッション限定に変更（GPSで自前ラップ検出した時のみ）",
+      "Drogger / aRacer SP / aRacer ECU はS/F関連の表示を一切しない（本体側のラップ検出を尊重）",
+      "「S/Fを動かしたのにラップ範囲は元のまま」という論理的な矛盾を解消",
+    ],
+  },
+  {
+    version: "1.5.6",
+    date: "2026-05-06",
+    notes: [
+      "GPSラップ検出v9：閾値を40km/hに変更（実測でフィニッシュラインから15-30m以内の精度）",
+      "**手動オーバーライド機能**：Trackタブで「✎ S/Fを動かす」ボタン → コース上をクリックで起点を任意位置に設定",
+      "ミニサーキット対応：絶対値40km/hなのでバイクが100km/hに届かないコースでも機能",
+    ],
+  },
+  {
+    version: "1.5.3",
+    date: "2026-05-06",
+    notes: [
+      "GPSラップ検出：訪問頻度ヒストグラム法に変更",
+      "GPS座標の妥当性チェック追加（緯度-90〜90、経度-180〜180を超えるノイズデータを除外）",
+      "ピット停止やセッション中断（800秒越えのギャップ）も自動的に「ラップ外」として処理",
+    ],
+  },
+  {
+    version: "1.5.1",
+    date: "2026-05-06",
+    notes: [
+      "ECU Memory形式（Cycling無し）も判別対応：ALL/FAST/Last10min/GPSなど取出し方の違いを全部吸収",
+      "17～237カラムまでカラム数のバリエーションに対応",
+      "GPSカラム有無は実データの値で判定（カラムだけあって値0の場合は「GPS無し」扱い）",
+    ],
+  },
+  {
+    version: "1.5.0",
+    date: "2026-05-06",
+    notes: [
+      "aRacer ECUログ（.loga）の3形式に対応：スマホ録画／ECU内部メモリ／Logger Module",
+      "ファイル形式を自動判別、Drogger CSV と aRacer .loga を同じUIで扱える",
+      "aRacer Logger ModuleのGPS情報（NMEA形式）をデコードしてTrack機能を有効化",
+      "GPS軌跡からのラップ自動検出（aRacer LMはIR_LapNumberが空のため自動算出）",
+      "GPS情報の有無に応じてTrack / Compareタブを自動制御",
+      "セッション一覧にソース種別バッジ（DRG/aR-SP/aR-ECU/aR-LM）を追加",
+    ],
+  },
+  {
+    version: "1.4.0",
+    date: "2026-05-06",
+    notes: [
+      "Speed・RPM・A/Fを統合した複合テレメトリグラフを追加（Drogger純正アプリ風）",
+      "Track / Compare 両モードで距離軸ベースの統合可視化",
+      "色分け：Speed=黄、RPM=シアン、A/F=ライム緑。Compareでは比較ラップが破線表示",
+    ],
+  },
+  {
+    version: "1.3.0",
+    date: "2026-05-06",
+    notes: [
+      "Track上のスピード/RPMトレースに再生位置カーソルを追加",
+      "ラップ判定をコース別に自動適応（短いカートコースから長い本格コースまで対応）",
+      "About / バージョン履歴パネルを追加",
+      "Vercel Analyticsで匿名ページビュー集計を開始",
+    ],
+  },
+  {
+    version: "1.2.0",
+    date: "2026-05-06",
+    notes: [
+      "A/F (空燃比) のフルレンジ可視化機能を追加",
+      "Track タブに A/F カラーマップを追加",
+      "Tuning タブを新設（ヒストグラム・RPM×AFR散布図・ラップ毎WOT平均推移）",
+      "再生コントロールに A/F 数値表示を追加",
+    ],
+  },
+  {
+    version: "1.1.0",
+    date: "2026-05-04",
+    notes: [
+      "スマホ・タブレット向けレスポンシブレイアウト対応",
+      "古いAndroid環境向けにファイル選択互換性を強化",
+      "Compareモードの両ラップ同時アニメーションを実時間ベースに修正",
+      "ラップタイム計算を Drogger CSV の正しい仕様に修正",
+    ],
+  },
+  {
+    version: "1.0.0",
+    date: "2026-05-04",
+    notes: [
+      "初版リリース",
+      "Track / Compare / Riders / Strategy タブ実装",
+      "GPSトラック上のSpeed/RPMカラーマッピング",
+      "再生アニメーション機能",
+      "ライダー・スティント割当て機能",
+      "エンジン形式（2st/4st）切替によるRPMカラー固定スケール",
+    ],
+  },
+];
+
+// ─── Inline SVG icon factory (replaces lucide-react) ─────────────
+const makeIcon = (children) => ({ size = 14, className = "", style = {} }) => (
+  <svg xmlns="http://www.w3.org/2000/svg" width={size} height={size} viewBox="0 0 24 24" fill="none"
+       stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"
+       className={className} style={{ display: "inline-block", verticalAlign: "middle", ...style }}>
+    {children}
+  </svg>
+);
+const Upload = makeIcon(<><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></>);
+const X = makeIcon(<><path d="M18 6 6 18"/><path d="m6 6 12 12"/></>);
+const Plus = makeIcon(<><path d="M5 12h14"/><path d="M12 5v14"/></>);
+const Trash2 = makeIcon(<><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" x2="10" y1="11" y2="17"/><line x1="14" x2="14" y1="11" y2="17"/></>);
+const AlertCircle = makeIcon(<><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></>);
+const Activity = makeIcon(<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>);
+const MapPin = makeIcon(<><path d="M20 10c0 7-8 13-8 13s-8-6-8-13a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></>);
+const Users = makeIcon(<><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></>);
+const Layers = makeIcon(<><polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></>);
+const Gauge = makeIcon(<><path d="m12 14 4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/></>);
+const UserCog = makeIcon(<><circle cx="18" cy="15" r="3"/><circle cx="9" cy="7" r="4"/><path d="M10 15H6a4 4 0 0 0-4 4v2"/><path d="m21.7 16.4-.9-.3"/><path d="m15.2 13.9-.9-.3"/><path d="m16.6 18.7.3-.9"/><path d="m19.1 12.2.3-.9"/><path d="m19.6 18.7-.4-1"/><path d="m16.8 12.3-.4-1"/><path d="m14.3 16.6 1-.4"/><path d="m20.7 13.8 1-.4"/></>);
+const ChevronDown = makeIcon(<path d="m6 9 6 6 6-6"/>);
+const Play = makeIcon(<polygon points="6 3 20 12 6 21 6 3"/>);
+const Pause = makeIcon(<><rect x="14" y="4" width="4" height="16" rx="0.5"/><rect x="6" y="4" width="4" height="16" rx="0.5"/></>);
+const RotateCcw = makeIcon(<><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></>);
+const Menu = makeIcon(<><line x1="4" x2="20" y1="12" y2="12"/><line x1="4" x2="20" y1="6" y2="6"/><line x1="4" x2="20" y1="18" y2="18"/></>);
+const Info = makeIcon(<><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="16" y2="12"/><line x1="12" x2="12.01" y1="8" y2="8"/></>);
+const Github = makeIcon(<path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/>);
+
+// ─── Helpers ─────────────────────────────────────────────────────
+const fmtTime = (s) => {
+  if (s == null || isNaN(s)) return "—";
+  const m = Math.floor(s / 60);
+  const sec = (s - m * 60).toFixed(3);
+  return m > 0 ? `${m}:${sec.padStart(6, "0")}` : `${parseFloat(sec).toFixed(3)}`;
+};
+const fmtNum = (n, d = 1) => (n == null || isNaN(n) ? "—" : n.toFixed(d));
+
+const llToMeters = (lat, lon, lat0, lon0) => {
+  const mLat = 111000;
+  const mLon = 111000 * Math.cos((lat0 * Math.PI) / 180);
+  return [(lon - lon0) * mLon, (lat - lat0) * mLat];
+};
+
+const newId = () => `id_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+
+// ─── RPM color: fixed scale, engine-type aware ───────────────────
+// 2st: ≤5,000=blue, 8,000=yellow, 14,000=red
+// 4st: ≤3,000=blue, 8,000=yellow, 12,000=red
+const RPM_STOPS = {
+  "2st": { low: 5000, mid: 8000, high: 14000 },
+  "4st": { low: 3000, mid: 8000, high: 12000 },
+};
+// HSL interpolation gives vivid mids (blue → cyan → green → yellow → orange → red)
+const rpmColor = (rpm, engineType = "4st") => {
+  const { low, mid, high } = RPM_STOPS[engineType] || RPM_STOPS["4st"];
+  let h, s, l;
+  if (rpm <= low)        { h = 220; s = 85; l = 50; }
+  else if (rpm >= high)  { h = 0;   s = 90; l = 50; }
+  else if (rpm < mid) {
+    const t = (rpm - low) / (mid - low);
+    h = 220 + (50 - 220) * t;
+    s = 85 + (95 - 85) * t;
+    l = 50 + (55 - 50) * t;
+  } else {
+    const t = (rpm - mid) / (high - mid);
+    h = 50 + (0 - 50) * t;
+    s = 95 + (90 - 95) * t;
+    l = 55 + (50 - 55) * t;
+  }
+  return `hsl(${h.toFixed(0)},${s.toFixed(0)}%,${l.toFixed(0)}%)`;
+};
+
+// ─── AFR color: full 8.0–20.0 range, engine-type aware target band ─
+// Multi-stop gradient: deep blue (rich) → cyan → green (target) → yellow → red (lean)
+const AFR_TARGETS = {
+  "2st": { low: 11.5, mid: 12.0, high: 12.5 },
+  "4st": { low: 12.5, mid: 13.0, high: 13.5 },
+};
+const AFR_MIN = 8.0;
+const AFR_MAX = 20.0;
+// HSL interpolation between stops; gradient "warmer = leaner = more dangerous"
+const afrColor = (afr, engineType = "4st") => {
+  const t = AFR_TARGETS[engineType] || AFR_TARGETS["4st"];
+  // Build stop array: [afrValue, h, s, l]
+  const stops = [
+    [AFR_MIN, 240, 80, 30],   // very rich: deep blue
+    [11.0,    210, 85, 50],   // rich: blue
+    [t.low,   170, 80, 50],   // approaching target: teal
+    [t.mid,   135, 85, 50],   // optimal target: vivid green
+    [t.high,   80, 85, 55],   // top of target: yellow-green
+    [14.7,     55, 95, 55],   // stoich: yellow
+    [17.0,     20, 95, 55],   // lean warning: orange
+    [AFR_MAX,   0, 90, 45],   // very lean: deep red
+  ];
+  // Clamp to range
+  if (afr <= stops[0][0]) {
+    const [, h, s, l] = stops[0];
+    return `hsl(${h},${s}%,${l}%)`;
+  }
+  if (afr >= stops[stops.length - 1][0]) {
+    const [, h, s, l] = stops[stops.length - 1];
+    return `hsl(${h},${s}%,${l}%)`;
+  }
+  for (let i = 0; i < stops.length - 1; i++) {
+    const [a1, h1, s1, l1] = stops[i];
+    const [a2, h2, s2, l2] = stops[i + 1];
+    if (afr >= a1 && afr <= a2) {
+      const k = (afr - a1) / (a2 - a1);
+      const h = h1 + (h2 - h1) * k;
+      const s = s1 + (s2 - s1) * k;
+      const l = l1 + (l2 - l1) * k;
+      return `hsl(${h.toFixed(0)},${s.toFixed(0)}%,${l.toFixed(0)}%)`;
+    }
+  }
+  return "#888";
+};
+
+// ─── Cross-browser file text reader (file.text() needs Chrome 76+) ───
+const readFileAsText = (file) => new Promise((resolve, reject) => {
+  if (typeof file.text === "function") {
+    file.text().then(resolve).catch(reject);
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = () => resolve(reader.result);
+  reader.onerror = () => reject(reader.error || new Error("FileReader failed"));
+  reader.readAsText(file);
+});
+
+// ─── Find sample at given elapsed seconds since lap start ────────
+// Uses RunTime (absolute session time) to locate the sample. If the
+// requested elapsed exceeds the lap's duration, returns the last sample
+// (so a fast lap "parks" at the finish while a slower lap continues).
+const sampleAtElapsed = (lap, elapsedSec) => {
+  if (!lap || !lap.samples.length) return null;
+  const t0 = lap.samples[0].RunTime;
+  const tEnd = lap.samples[lap.samples.length - 1].RunTime;
+  const target = t0 + Math.max(0, Math.min(tEnd - t0, elapsedSec));
+  for (let i = 0; i < lap.samples.length; i++) {
+    if (lap.samples[i].RunTime >= target) return lap.samples[i];
+  }
+  return lap.samples[lap.samples.length - 1];
+};
+
+// ─── Parse one Drogger CSV ───────────────────────────────────────
+// ─── Log file format detection ───────────────────────────────────
+// Returns one of: 'drogger', 'aracer_sp', 'aracer_ecu', 'aracer_lm', 'unknown'
+const detectLogFormat = (text) => {
+  const firstLine = text.split("\n", 1)[0].trim();
+  if (firstLine.startsWith("<aRacer APP Log Data for RaceAMP>"))     return "aracer_sp";
+  // ECU memory has two header variants: "Cycling Memory" (looped buffer) and plain "ECU Memory" (full export)
+  if (firstLine.startsWith("<Cycling Memory Log Data of Super ECU>")) return "aracer_ecu";
+  if (firstLine.startsWith("<ECU Memory Log Data of Super ECU>"))     return "aracer_ecu";
+  if (firstLine.startsWith("<aRacer ECU_Memory Log Data for RaceAMP>")) return "aracer_lm";
+  // Drogger CSV starts with column header line containing common field names
+  if (firstLine.includes("Lap") && firstLine.includes("Rpm") && firstLine.includes("RunTime")) return "drogger";
+  return "unknown";
+};
+
+// ─── aRacer .loga parser ─────────────────────────────────────────
+// Returns array of records compatible with parseSession (Drogger-style fields)
+// All 3 aRacer formats share the same structure:
+//   L1: <type marker>
+//   L2-4: metadata (date, ID, version)
+//   L5: stage/flag classification (ignored)
+//   L6: column headers
+//   L7+: data rows
+const parseAracerLog = (text, format) => {
+  const lines = text.split(/\r?\n/);
+  if (lines.length < 8) throw new Error("aRacer ログのデータ行が不足しています");
+
+  const headers = lines[5].split(",");
+  // Helper: find column index by matching tail of name (after last dot, before slash)
+  // e.g. "Fuel.NBO2_BL_En/" → "NBO2_BL_En", "IR_LapNumber/圈數" → "IR_LapNumber"
+  const normalizeHeader = (h) => {
+    const beforeSlash = h.split("/")[0];
+    const afterDot = beforeSlash.split(".").pop();
+    return afterDot.trim().toLowerCase();
+  };
+  const normalizedHeaders = headers.map(normalizeHeader);
+  const findIdx = (...patterns) => {
+    for (const p of patterns) {
+      const idx = normalizedHeaders.indexOf(p.toLowerCase());
+      if (idx >= 0) return idx;
+    }
+    return -1;
+  };
+
+  const idx = {
+    Rpm:          findIdx("rpm"),
+    Speed:        findIdx("vehicle_speed_filtered", "vehicle_speed", "gps_speed"),
+    Afr:          findIdx("afr_wbo2_cal", "afr"),
+    ThrottolePos: findIdx("tps_percent"),
+    Voltage:      findIdx("volt_batt_indx"),
+    Lap:          findIdx("ir_lapnumber"),
+    LapTime:      findIdx("ir_laptime"),
+    LeanAngle:    findIdx("tc_lean_angle"),
+    GearNum:      findIdx("gearnum"),
+    GpsLatDeg:    findIdx("gps_lat_deg"),
+    GpsLatMin:    findIdx("gps_lat_min"),
+    GpsLatMmmm:   findIdx("gps_lat_mmmm"),
+    GpsLatNS:     findIdx("gps_lat_ns"),
+    GpsLonDeg:    findIdx("gps_lon_deg"),
+    GpsLonMin:    findIdx("gps_lon_min"),
+    GpsLonMmmm:   findIdx("gps_lon_mmmm"),
+    GpsLonEW:     findIdx("gps_lon_ew"),
+  };
+  const hasGpsCols = idx.GpsLatDeg >= 0 && idx.GpsLatMin >= 0 && idx.GpsLatMmmm >= 0;
+
+  // Sampling rate auto-detect: if first 100 rows imply > 12 Hz, downsample to ~10 Hz
+  const probeRows = Math.min(100, lines.length - 7);
+  let sampleStride = 1;
+  if (probeRows > 10) {
+    const t0 = parseFloat(lines[6].split(",")[0]);
+    const tEnd = parseFloat(lines[6 + probeRows - 1].split(",")[0]);
+    if (!isNaN(t0) && !isNaN(tEnd) && tEnd > t0) {
+      const hz = (probeRows - 1) / ((tEnd - t0) / 1000);
+      if (hz > 12) sampleStride = Math.max(1, Math.round(hz / 10));
+    }
+  }
+
+  const data = [];
+  let hasAnyGps = false;
+
+  // Parse data rows
+  for (let li = 6; li < lines.length; li += sampleStride) {
+    const line = lines[li];
+    if (!line || !line.length) continue;
+    const parts = line.split(",");
+    const tMs = parseFloat(parts[0]);
+    if (isNaN(tMs)) continue;
+
+    const num = (i) => i >= 0 && i < parts.length ? (parseFloat(parts[i]) || 0) : 0;
+    const intNum = (i) => i >= 0 && i < parts.length ? (parseInt(parts[i], 10) || 0) : 0;
+
+    let lat = 0, lon = 0;
+    if (hasGpsCols) {
+      const ld = num(idx.GpsLatDeg);
+      if (ld > 0) {
+        const lm = num(idx.GpsLatMin);
+        const lmm = num(idx.GpsLatMmmm);
+        lat = ld + (lm + lmm / 10000) / 60;
+        const od = num(idx.GpsLonDeg);
+        const om = num(idx.GpsLonMin);
+        const omm = num(idx.GpsLonMmmm);
+        lon = od + (om + omm / 10000) / 60;
+        // NS/EW stored as ASCII codes: N=78, S=83, E=69, W=87
+        const ns = intNum(idx.GpsLatNS);
+        const ew = intNum(idx.GpsLonEW);
+        if (ns === 83) lat = -lat; // South
+        if (ew === 87) lon = -lon; // West
+        // Validate: must be within Earth's coordinate range
+        if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+          lat = 0; lon = 0;
+        } else {
+          hasAnyGps = true;
+        }
+      }
+    }
+
+    data.push({
+      RunTime:      tMs / 1000,
+      LapRunTime:   0, // computed later
+      LapTime:      num(idx.LapTime),
+      Lap:          intNum(idx.Lap),
+      Rpm:          num(idx.Rpm),
+      Speed:        num(idx.Speed),
+      Afr:          num(idx.Afr),
+      ThrottolePos: num(idx.ThrottolePos),
+      Voltage:      num(idx.Voltage),
+      Latitude:     lat,
+      Longitude:    lon,
+      Front: 0, Rear: 0, T1: 0, T2: 0, T3: 0, RearSpeed: 0, accuracy: 0,
+    });
+  }
+
+  return { data, hasGps: hasAnyGps, format, sampleStride };
+};
+
+// ─── CIRCUITS DB ─────────────────────────────────────────────────
+// Known S/F finish line coordinates (two GPS points defining the line segment
+// the bike crosses each lap). Add circuits as needed — coordinates confirmed
+// from Google Maps satellite imagery and cross-checked with actual log data.
+const CIRCUITS = [
+  {
+    id: "tsukuba_2000",
+    name: "筑波サーキット コース2000",
+    finishLine: [
+      { Latitude: 36.1501667, Longitude: 139.9194167 },
+      { Latitude: 36.1500556, Longitude: 139.9200556 },
+    ],
+  },
+  {
+    id: "tsukuba_1000",
+    name: "筑波サーキット コース1000",
+    finishLine: [
+      { Latitude: 36.1510833, Longitude: 139.9247778 },
+      { Latitude: 36.1510000, Longitude: 139.9251389 },
+    ],
+  },
+  {
+    id: "motegi_kart_north",
+    name: "モビリティリゾートもてぎ 北ショートコース",
+    finishLine: [
+      { Latitude: 36.5385000, Longitude: 140.2319167 },
+      { Latitude: 36.5384722, Longitude: 140.2323611 },
+    ],
+  },
+  {
+    id: "motegi_road",
+    name: "モビリティリゾートもてぎ ロードコース",
+    finishLine: [
+      { Latitude: 36.5330000, Longitude: 140.2266389 },
+      { Latitude: 36.5331389, Longitude: 140.2269444 },
+    ],
+  },
+];
+
+// ─── Line segment intersection test (2D Cartesian) ───────────────
+// Returns true when segment AB crosses segment CD.
+// Tolerance ε on t/u avoids floating-point misses at endpoints.
+const segmentsIntersect = (ax, ay, bx, by, cx, cy, dx, dy) => {
+  const denom = (bx - ax) * (dy - cy) - (by - ay) * (dx - cx);
+  if (Math.abs(denom) < 1e-9) return false; // parallel / collinear
+  const t = ((cx - ax) * (dy - cy) - (cy - ay) * (dx - cx)) / denom;
+  const u = ((cx - ax) * (by - ay) - (cy - ay) * (bx - ax)) / denom;
+  const ε = 0.001;
+  return t >= -ε && t <= 1 + ε && u >= -ε && u <= 1 + ε;
+};
+
+// ─── Circuit auto-matcher ─────────────────────────────────────────
+// Computes the session's median GPS position and finds the nearest circuit
+// finish-line midpoint within MATCH_DIST_M (10 km). Returns null if no match.
+const matchCircuit = (validGps) => {
+  if (!validGps.length) return null;
+  const MATCH_DIST_M = 10000;
+  const sorted = [...validGps].sort((a, b) => a.Latitude - b.Latitude);
+  const medLat = sorted[Math.floor(sorted.length / 2)].Latitude;
+  const cosMed = Math.cos(medLat * Math.PI / 180);
+  const sortedLon = [...validGps].sort((a, b) => a.Longitude - b.Longitude);
+  const medLon = sortedLon[Math.floor(sortedLon.length / 2)].Longitude;
+
+  let best = null, bestDist = MATCH_DIST_M;
+  for (const c of CIRCUITS) {
+    const flLat = (c.finishLine[0].Latitude + c.finishLine[1].Latitude) / 2;
+    const flLon = (c.finishLine[0].Longitude + c.finishLine[1].Longitude) / 2;
+    const dist = Math.hypot(
+      (medLat - flLat) * 111320,
+      (medLon - flLon) * 111320 * cosMed
+    );
+    if (dist < bestDist) { bestDist = dist; best = c; }
+  }
+  return best;
+};
+
+// ─── GPS-based lap detection — history & strategy ────────────────
+// v10 (current): two-pass approach:
+//   Pass 1 — CIRCUITS DB matching + line-segment crossing (precise).
+//             If the session's GPS median lies within 10 km of a known circuit,
+//             compute true lap crossings by testing each consecutive GPS-sample
+//             pair against the finish-line segment. No proximity-radius errors.
+//             Validated: もてぎ北ショート LM ログで 17 laps / ベスト 52.1s 再現.
+//   Pass 2 — v9 pit-out fallback (40 km/h threshold).
+//             Used when circuit is not in DB or crossings < 1.
+//             Validated within 15-27m of finish line on もてぎ本コース.
+//
+// Manual override: the user can click on the Track plot (aRacer LM only)
+// to set a custom S/F position. That uses applyLapsFromGpsRef (radius method).
+const detectLapsFromGps = (data) => {
+  const validGps = data.filter((r) => r.Latitude !== 0 && r.Longitude !== 0);
+  if (validGps.length < 50) return null;
+
+  // ── Pass 1: CIRCUITS DB + line-segment intersection ──────────────
+  const circuit = matchCircuit(validGps);
+  if (circuit) {
+    const lat0 = validGps[0].Latitude;
+    const lon0 = validGps[0].Longitude;
+    const cosMid = Math.cos(lat0 * Math.PI / 180);
+    const toXY = (lat, lon) => [
+      (lon - lon0) * 111320 * cosMid,
+      (lat - lat0) * 111320,
+    ];
+    const [fx1, fy1] = toXY(circuit.finishLine[0].Latitude, circuit.finishLine[0].Longitude);
+    const [fx2, fy2] = toXY(circuit.finishLine[1].Latitude, circuit.finishLine[1].Longitude);
+
+    // Extend the finish-line segment by GATE_EXTEND_M on each side.
+    // GPS positional accuracy is ~10-20 m, and racing lines vary.
+    // Without extension, samples near the segment endpoints can miss intersection.
+    // 20 m extension brings total gate width to ~70 m for Motegi (adequate;
+    // tested: 50 m already catches all crossings without false positives).
+    const GATE_EXTEND_M = 20;
+    const fLen = Math.hypot(fx2 - fx1, fy2 - fy1);
+    const [fux, fuy] = fLen > 0 ? [(fx2 - fx1) / fLen, (fy2 - fy1) / fLen] : [1, 0];
+    const gx1 = fx1 - fux * GATE_EXTEND_M;
+    const gy1 = fy1 - fuy * GATE_EXTEND_M;
+    const gx2 = fx2 + fux * GATE_EXTEND_M;
+    const gy2 = fy2 + fuy * GATE_EXTEND_M;
+
+    const COOLDOWN_S = 20; // minimum seconds between consecutive lap counts
+    const crossTimes = [];
+    let lastCrossTime = -1e9;
+    let prevR = null;
+
+    for (const r of data) {
+      if (r.Latitude === 0 || r.Longitude === 0) { prevR = null; continue; }
+      if (prevR && r.RunTime - lastCrossTime > COOLDOWN_S) {
+        const [px, py] = toXY(prevR.Latitude, prevR.Longitude);
+        const [cx, cy] = toXY(r.Latitude, r.Longitude);
+        if (segmentsIntersect(px, py, cx, cy, gx1, gy1, gx2, gy2)) {
+          // Interpolate crossing time between the two samples
+          crossTimes.push((prevR.RunTime + r.RunTime) / 2);
+          lastCrossTime = r.RunTime;
+        }
+      }
+      prevR = r;
+    }
+
+    if (crossTimes.length >= 1) {
+      // Assign Lap numbers: samples before first crossing = lap 0, then increment
+      let lapNum = 0, ci = 0;
+      for (const r of data) {
+        while (ci < crossTimes.length && r.RunTime >= crossTimes[ci]) {
+          lapNum++;
+          ci++;
+        }
+        r.Lap = lapNum;
+      }
+      // Compute LapRunTime + LapTime
+      const buckets = new Map();
+      for (const r of data) {
+        if (!buckets.has(r.Lap)) buckets.set(r.Lap, []);
+        buckets.get(r.Lap).push(r);
+      }
+      const sortedKeys = [...buckets.keys()].sort((a, b) => a - b);
+      for (let i = 0; i < sortedKeys.length; i++) {
+        const smpls = buckets.get(sortedKeys[i]);
+        smpls.sort((a, b) => a.RunTime - b.RunTime);
+        const t0 = smpls[0].RunTime;
+        smpls.forEach((r) => { r.LapRunTime = r.RunTime - t0; });
+        if (i + 1 < sortedKeys.length) {
+          const nxt = buckets.get(sortedKeys[i + 1]);
+          const dur = nxt[0].RunTime - t0;
+          nxt.forEach((r) => { r.LapTime = dur * 1000; });
+        }
+      }
+      // Return finish-line midpoint as lapRef (visual S/F marker)
+      return {
+        Latitude: (circuit.finishLine[0].Latitude + circuit.finishLine[1].Latitude) / 2,
+        Longitude: (circuit.finishLine[0].Longitude + circuit.finishLine[1].Longitude) / 2,
+        circuitName: circuit.name,
+      };
+    }
+    // Circuit matched but no crossings detected (GPS gap over finish line?)
+    // Fall through to Pass 2.
+  }
+
+  // ── Pass 2: v9 pit-out detection (40 km/h threshold) ─────────────
+  const SLOW_T = 20, FAST_T = 40, WIN = 5;
+  const smoothSpeed = new Array(data.length);
+  for (let i = 0; i < data.length; i++) {
+    let sum = 0, n = 0;
+    for (let j = Math.max(0, i - Math.floor(WIN / 2)); j <= Math.min(data.length - 1, i + Math.floor(WIN / 2)); j++) {
+      sum += data[j].Speed; n++;
+    }
+    smoothSpeed[i] = sum / n;
+  }
+
+  const pitOuts = [];
+  let state = "unknown";
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    if (r.Latitude === 0) continue;
+    const s = smoothSpeed[i];
+    if (state === "unknown") {
+      if (s < SLOW_T) state = "slow";
+      else if (s > FAST_T) state = "fast";
+    } else if (state === "slow" && s > FAST_T) {
+      pitOuts.push({ Latitude: r.Latitude, Longitude: r.Longitude });
+      state = "fast";
+    } else if (state === "fast" && s < SLOW_T) {
+      state = "slow";
+    }
+  }
+
+  let ref = null;
+  if (pitOuts.length > 0) {
+    let sumLat = 0, sumLon = 0;
+    for (const p of pitOuts) { sumLat += p.Latitude; sumLon += p.Longitude; }
+    ref = { Latitude: sumLat / pitOuts.length, Longitude: sumLon / pitOuts.length };
+  } else {
+    // Fallback for partial-session files (e.g. cyclic-buffer "last 10 min" exports)
+    const maxSpeed = validGps.reduce((m, r) => r.Speed > m ? r.Speed : m, 0);
+    let threshold = maxSpeed * 0.7;
+    let fastSamples = validGps.filter((r) => r.Speed > threshold);
+    if (fastSamples.length < 20) { threshold = maxSpeed * 0.5; fastSamples = validGps.filter((r) => r.Speed > threshold); }
+    if (fastSamples.length < 20) fastSamples = validGps;
+    const GRID = 0.0001;
+    const cells = new Map();
+    for (const r of fastSamples) {
+      const key = `${Math.round(r.Latitude / GRID)},${Math.round(r.Longitude / GRID)}`;
+      cells.set(key, (cells.get(key) || 0) + 1);
+    }
+    if (!cells.size) return null;
+    let bestKey = null, bestCount = 0;
+    for (const [k, c] of cells) { if (c > bestCount) { bestCount = c; bestKey = k; } }
+    const [bestLatI, bestLonI] = bestKey.split(",").map(Number);
+    ref = { Latitude: bestLatI * GRID, Longitude: bestLonI * GRID };
+  }
+
+  applyLapsFromGpsRef(data, ref);
+  return ref;
+};
+
+// ─── Lap detection logic, separated so it can be re-run on user override ───
+const applyLapsFromGpsRef = (data, ref) => {
+  if (!ref) return;
+  const distM = (a, b) => {
+    const dLat = (b.Latitude - a.Latitude) * 111320;
+    const dLon = (b.Longitude - a.Longitude) * 111320 * Math.cos(a.Latitude * Math.PI / 180);
+    return Math.hypot(dLat, dLon);
+  };
+  const NEAR_M = 50;
+  const FAR_M = 200;
+  const COOLDOWN_S = 30;
+
+  let currentLap = 0;
+  let maxFromRef = 0;
+  let lastLapTime = -1e9;
+  let inZonePrev = false;
+
+  for (let i = 0; i < data.length; i++) {
+    const r = data[i];
+    if (r.Latitude === 0) { r.Lap = currentLap; continue; }
+    const d = distM(ref, r);
+    if (d > maxFromRef) maxFromRef = d;
+    const inZone = d < NEAR_M;
+    if (inZone && !inZonePrev && maxFromRef > FAR_M && (r.RunTime - lastLapTime) > COOLDOWN_S) {
+      currentLap++;
+      maxFromRef = 0;
+      lastLapTime = r.RunTime;
+    }
+    inZonePrev = inZone;
+    r.Lap = currentLap;
+  }
+
+  // LapRunTime + LapTime per Drogger semantics
+  const lapBuckets = new Map();
+  for (const r of data) {
+    if (!lapBuckets.has(r.Lap)) lapBuckets.set(r.Lap, []);
+    lapBuckets.get(r.Lap).push(r);
+  }
+  const sortedLaps = [...lapBuckets.keys()].sort((a, b) => a - b);
+  for (let i = 0; i < sortedLaps.length; i++) {
+    const samples = lapBuckets.get(sortedLaps[i]);
+    samples.sort((a, b) => a.RunTime - b.RunTime);
+    const lapStart = samples[0].RunTime;
+    samples.forEach((r) => { r.LapRunTime = r.RunTime - lapStart; });
+    if (i + 1 < sortedLaps.length) {
+      const nextSamples = lapBuckets.get(sortedLaps[i + 1]);
+      const dur = nextSamples[0].RunTime - lapStart;
+      nextSamples.forEach((r) => { r.LapTime = dur * 1000; });
+    }
+  }
+};
+
+const parseSession = (rawData, name, type, options = {}) => {
+  const { source = "drogger", hasGps = true, lapRef = null } = options;
+  const lapMap = new Map();
+  rawData.forEach((row) => {
+    const lap = row.Lap;
+    if (!lapMap.has(lap)) lapMap.set(lap, { lap, samples: [] });
+    lapMap.get(lap).samples.push(row);
+  });
+
+  const lapsRaw = [];
+  for (const [lap, e] of lapMap.entries()) {
+    if (lap < 0) continue;
+    const samples = e.samples;
+    lapsRaw.push({ lap, samples });
+  }
+  lapsRaw.sort((a, b) => a.samples[0].RunTime - b.samples[0].RunTime);
+
+  const laps = [];
+  for (let i = 0; i < lapsRaw.length; i++) {
+    const { lap, samples } = lapsRaw[i];
+    // The official lap time for Lap N is stored in Lap N+1's LapTime column
+    // (Drogger writes the just-finished lap time into the next lap's samples).
+    // NOTE: This convention is Drogger-ONLY. aRacer IR_LapTime uses an
+    // undocumented internal tick unit (~2.0e7 for a 90s lap, non-constant rate)
+    // and must NEVER be interpreted as milliseconds — doing so produced
+    // ~19,900s "laps" that failed every validity filter (found 2026-07-11,
+    // first file with a live IR lap system after S/F line re-creation).
+    // For aRacer sources, always use the RunTime delta.
+    let dur;
+    const next = lapsRaw[i + 1];
+    const isDroggerSource = source === "drogger";
+    if (isDroggerSource && next && next.samples[0].LapTime && next.samples[0].LapTime > 0) {
+      dur = next.samples[0].LapTime / 1000;
+    } else {
+      dur = samples[samples.length - 1].RunTime - samples[0].RunTime;
+    }
+    const speeds = samples.map((s) => s.Speed).filter((s) => s > 0);
+    const rpms = samples.map((s) => s.Rpm).filter((s) => s > 0);
+    const movingSpeeds = samples.map((s) => s.Speed).filter((s) => s > 5);
+    laps.push({
+      lap, duration: dur,
+      startTime: samples[0].RunTime,
+      endTime: samples[samples.length - 1].RunTime,
+      maxRpm: rpms.length ? Math.max(...rpms) : 0,
+      maxSpeed: speeds.length ? Math.max(...speeds) : 0,
+      avgSpeed: movingSpeeds.length ? movingSpeeds.reduce((a, b) => a + b, 0) / movingSpeeds.length : 0,
+      samples,
+    });
+  }
+  laps.sort((a, b) => a.startTime - b.startTime);
+
+  const validGps = rawData.filter((r) => r.Latitude > 0 && r.Longitude > 0);
+  const lat0 = validGps.length ? validGps.reduce((a, r) => a + r.Latitude, 0) / validGps.length : 0;
+  const lon0 = validGps.length ? validGps.reduce((a, r) => a + r.Longitude, 0) / validGps.length : 0;
+
+  // Auto-adaptive racing-lap detection: use median lap time of "plausible"
+  // laps (10-600s absolute bounds), then keep laps within 0.55x..1.7x of median.
+  // This adapts to short kart courses (~40s) and longer circuits (~110s) alike.
+  const plausibleDurations = laps.map((l) => l.duration).filter((d) => d > 10 && d < 600);
+  const medianDur = plausibleDurations.length
+    ? [...plausibleDurations].sort((a, b) => a - b)[Math.floor(plausibleDurations.length / 2)]
+    : 0;
+  const racingMin = medianDur > 0 ? medianDur * 0.55 : 10;
+  const racingMax = medianDur > 0 ? medianDur * 1.7 : 600;
+  laps.forEach((l) => { l.isRacing = l.duration >= racingMin && l.duration <= racingMax; });
+
+  let stints = [];
+  let cur = null;
+  laps.forEach((lap) => {
+    if (!lap.isRacing) {
+      if (cur) { stints.push(cur); cur = null; }
+      return;
+    }
+    if (!cur) cur = { id: newId(), startLap: lap.lap, endLap: lap.lap, laps: [lap] };
+    else { cur.endLap = lap.lap; cur.laps.push(lap); }
+  });
+  if (cur) stints.push(cur);
+
+  return {
+    id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0,
+    source,
+    hasGps: hasGps && rawData.some((r) => r.Latitude !== 0 && r.Longitude !== 0),
+    // lapRef is ONLY set when GPS-based lap detection was performed (aRacer LM).
+    // For Drogger / aRacer SP / aRacer ECU where lap data comes from the device,
+    // lapRef stays null — so the S/F edit UI is hidden.
+    lapRef,
+    totalSamples: rawData.length,
+    hasAfr: rawData.some((r) => r.Afr && r.Afr > 0),
+    hasThrottle: rawData.some((r) => r.ThrottolePos && r.ThrottolePos > 0),
+    duration: rawData[rawData.length - 1].RunTime - rawData[0].RunTime,
+  };
+};
+
+// ─── Recompute laps with a manually-specified reference point ───────
+// Used when the user clicks on the Track plot to override auto-detection.
+// Preserves session id / engineType so UI state (selected lap, stint
+// assignments, etc.) remains valid.
+const recomputeLapsForSession = (session, newRef) => {
+  // Flatten all samples back into a single array, sort by RunTime
+  const allSamples = session.laps.flatMap((l) => l.samples);
+  allSamples.sort((a, b) => a.RunTime - b.RunTime);
+  // Re-assign Lap field based on new reference
+  applyLapsFromGpsRef(allSamples, newRef);
+  // Re-build session structure
+  const next = parseSession(allSamples, session.name, session.type, {
+    source: session.source,
+    hasGps: session.hasGps,
+    lapRef: newRef,
+  });
+  // Preserve persistent identifiers
+  next.id = session.id;
+  next.engineType = session.engineType;
+  return next;
+};
+
+// ─── Lap statistics helpers ───────────────────────────────────────
+// computeLapStats: aggregate per-lap metrics from sample data
+// findBests: identify the best value per column for green highlighting
+//   - duration: lowest wins (faster lap)
+//   - others: highest wins (more peak performance)
+// Per racing convention, BEST values are shown in GREEN.
+const computeLapStats = (lap, hasAfr, hasThrottle) => {
+  const samples = lap.samples;
+  if (!samples || samples.length === 0) return { lap: lap.lap, duration: lap.duration };
+
+  let maxSpeed = 0, sumSpeed = 0, speedN = 0;
+  let maxRpm = 0, sumRpm = 0, rpmN = 0;
+  let wotN = 0, tpsN = 0;
+  const afrValues = [];
+
+  for (const s of samples) {
+    if (s.Speed > 0) {
+      if (s.Speed > maxSpeed) maxSpeed = s.Speed;
+      sumSpeed += s.Speed; speedN++;
+    }
+    if (s.Rpm > 0) {
+      if (s.Rpm > maxRpm) maxRpm = s.Rpm;
+      sumRpm += s.Rpm; rpmN++;
+    }
+    if (hasAfr && s.Afr > 5 && s.Afr < 25) {
+      afrValues.push(s.Afr);
+    }
+    if (hasThrottle && s.ThrottolePos !== undefined) {
+      tpsN++;
+      if (s.ThrottolePos > 90) wotN++;
+    }
+  }
+  afrValues.sort((a, b) => a - b);
+
+  return {
+    lap:        lap.lap,
+    duration:   lap.duration,
+    maxSpeed:   speedN > 0 ? maxSpeed : null,
+    avgSpeed:   speedN > 0 ? sumSpeed / speedN : null,
+    maxRpm:     rpmN > 0 ? maxRpm : null,
+    avgRpm:     rpmN > 0 ? sumRpm / rpmN : null,
+    afrMedian:  afrValues.length > 0 ? afrValues[Math.floor(afrValues.length / 2)] : null,
+    wotPercent: tpsN > 0 ? (wotN / tpsN * 100) : null,
+    samples:    samples.length,
+  };
+};
+
+const findLapBests = (allStats) => {
+  const bests = {};
+  // Lower is better
+  for (const key of ["duration"]) {
+    const vals = allStats.map((s) => s[key]).filter((v) => v != null && !isNaN(v));
+    if (vals.length) bests[key] = Math.min(...vals);
+  }
+  // Higher is better
+  for (const key of ["maxSpeed", "avgSpeed", "maxRpm", "wotPercent"]) {
+    const vals = allStats.map((s) => s[key]).filter((v) => v != null && !isNaN(v));
+    if (vals.length) bests[key] = Math.max(...vals);
+  }
+  return bests;
+};
+
+// Format a delta in M:SS.fff or +S.fff format
+const fmtDelta = (sec) => {
+  if (sec == null || isNaN(sec)) return "—";
+  if (sec === 0) return "—";
+  const sign = sec > 0 ? "+" : "−";
+  const abs = Math.abs(sec);
+  if (abs >= 60) {
+    const m = Math.floor(abs / 60);
+    const s = (abs % 60).toFixed(3).padStart(6, "0");
+    return `${sign}${m}:${s}`;
+  }
+  return `${sign}${abs.toFixed(3)}`;
+};
+
+const BEST_GREEN = "#22c55e";
+
+// ─── Lap statistics table ─────────────────────────────────────────
+// Tabular view showing per-lap metrics with best-value highlighting.
+// Per racing convention, BEST values are GREEN. Currently selected lap
+// row gets the standard yellow accent highlight (consistent with chips).
+const LapTable = ({ laps, selectedLap, onSelectLap, hasAfr, hasThrottle, lookupRiderForLap, isMobile }) => {
+  const stats = React.useMemo(
+    () => laps.map((l) => computeLapStats(l, hasAfr, hasThrottle)),
+    [laps, hasAfr, hasThrottle]
+  );
+  const bests = React.useMemo(() => findLapBests(stats), [stats]);
+
+  // Show RPM column only if any lap has meaningful RPM data
+  const showRpm = stats.some((s) => s.maxRpm != null && s.maxRpm > 0);
+
+  const cellClass = (key, val) => {
+    if (val == null) return "text-gray-600";
+    if (bests[key] != null && val === bests[key]) return "font-bold";
+    return "text-gray-200";
+  };
+  const cellColor = (key, val) => {
+    if (val == null) return null;
+    if (bests[key] != null && val === bests[key]) return BEST_GREEN;
+    return null;
+  };
+
+  const headerCellStyle = {
+    background: PANEL_2,
+    color: FG_MUTE,
+    borderBottom: `1px solid ${STROKE}`,
+    padding: isMobile ? "8px 6px" : "6px 8px",
+    fontSize: isMobile ? 10 : 9,
+    fontFamily: "monospace",
+    textTransform: "uppercase",
+    letterSpacing: "0.1em",
+    fontWeight: 500,
+    whiteSpace: "nowrap",
+  };
+  const cellStyle = {
+    padding: isMobile ? "8px 6px" : "5px 8px",
+    fontSize: isMobile ? 11 : 10,
+    fontFamily: "monospace",
+    fontVariantNumeric: "tabular-nums",
+    whiteSpace: "nowrap",
+  };
+
+  return (
+    <div className="overflow-x-auto overflow-y-auto" style={{ maxHeight: isMobile ? 360 : 320 }}>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead style={{ position: "sticky", top: 0, zIndex: 1 }}>
+          <tr>
+            <th style={{ ...headerCellStyle, textAlign: "left", position: "sticky", left: 0, zIndex: 2 }}>Lap</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Time</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Δ Best</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Max km/h</th>
+            <th style={{ ...headerCellStyle, textAlign: "right" }}>Avg km/h</th>
+            {showRpm && <th style={{ ...headerCellStyle, textAlign: "right" }}>Max RPM</th>}
+            {hasAfr     && <th style={{ ...headerCellStyle, textAlign: "right" }}>A/F med</th>}
+            {hasThrottle && <th style={{ ...headerCellStyle, textAlign: "right" }}>WOT%</th>}
+          </tr>
+        </thead>
+        <tbody>
+          {stats.map((s) => {
+            const r = lookupRiderForLap(s.lap);
+            const isSelected = selectedLap === s.lap;
+            const isBest = bests.duration != null && s.duration === bests.duration;
+            const delta = bests.duration != null ? s.duration - bests.duration : null;
+            const rowBg = isSelected ? "rgba(250,204,21,0.12)" : "transparent";
+
+            return (
+              <tr key={s.lap}
+                  onClick={() => onSelectLap(s.lap)}
+                  className="cursor-pointer"
+                  style={{
+                    background: rowBg,
+                    borderBottom: `1px solid ${STROKE}`,
+                    borderLeft: isSelected ? `2px solid ${ACCENT}` : "2px solid transparent",
+                  }}
+                  onMouseEnter={(e) => { if (!isSelected) e.currentTarget.style.background = "rgba(255,255,255,0.03)"; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = rowBg; }}>
+                <td style={{ ...cellStyle, position: "sticky", left: 0, background: isSelected ? "#1f2533" : PANEL, color: isSelected ? ACCENT : FG, fontWeight: isSelected ? 700 : 500, zIndex: 1 }}>
+                  <span className="inline-flex items-center gap-1.5">
+                    {r && <span className="w-1.5 h-1.5" style={{ background: r.color, display: "inline-block" }}></span>}
+                    {isBest && <span style={{ color: BEST_GREEN }}>★</span>}
+                    L{s.lap}
+                  </span>
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: cellColor("duration", s.duration) || FG }} className={cellClass("duration", s.duration)}>
+                  {fmtTime(s.duration)}
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: isBest ? BEST_GREEN : FG_MUTE, fontWeight: isBest ? 700 : 400 }}>
+                  {delta == null ? "—" : isBest ? "BEST" : `+${delta.toFixed(3)}`}
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: cellColor("maxSpeed", s.maxSpeed) || FG }} className={cellClass("maxSpeed", s.maxSpeed)}>
+                  {s.maxSpeed != null ? s.maxSpeed.toFixed(1) : "—"}
+                </td>
+                <td style={{ ...cellStyle, textAlign: "right", color: cellColor("avgSpeed", s.avgSpeed) || FG }} className={cellClass("avgSpeed", s.avgSpeed)}>
+                  {s.avgSpeed != null ? s.avgSpeed.toFixed(1) : "—"}
+                </td>
+                {showRpm && (
+                  <td style={{ ...cellStyle, textAlign: "right", color: cellColor("maxRpm", s.maxRpm) || FG }} className={cellClass("maxRpm", s.maxRpm)}>
+                    {s.maxRpm != null ? s.maxRpm.toFixed(0) : "—"}
+                  </td>
+                )}
+                {hasAfr && (
+                  <td style={{ ...cellStyle, textAlign: "right", color: FG }}>
+                    {s.afrMedian != null ? s.afrMedian.toFixed(2) : "—"}
+                  </td>
+                )}
+                {hasThrottle && (
+                  <td style={{ ...cellStyle, textAlign: "right", color: cellColor("wotPercent", s.wotPercent) || FG }} className={cellClass("wotPercent", s.wotPercent)}>
+                    {s.wotPercent != null ? s.wotPercent.toFixed(0) + "%" : "—"}
+                  </td>
+                )}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+};
+
+// ─── UI primitives ───────────────────────────────────────────────
+const Panel = ({ title, accent, children, className = "", actions = null }) => (
+  <div className={`bg-[#111720] border border-[#252d3a] ${className}`} style={{ borderRadius: 2 }}>
+    {title && (
+      <div className="px-3 py-2 border-b border-[#252d3a] flex items-center justify-between gap-2">
+        <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 flex items-center gap-2 min-w-0">
+          {accent && <span className="w-1 h-3 flex-shrink-0" style={{ backgroundColor: ACCENT }}></span>}
+          <span className="truncate">{title}</span>
+        </div>
+        {actions && <div className="flex-shrink-0">{actions}</div>}
+      </div>
+    )}
+    {children}
+  </div>
+);
+
+const Btn = ({ onClick, children, primary, small, disabled, className = "" }) => (
+  <button onClick={onClick} disabled={disabled}
+    className={`font-mono uppercase tracking-wider transition-all border ${
+      primary ? "bg-yellow-400 border-yellow-400 text-black hover:bg-yellow-300"
+              : "bg-transparent border-[#252d3a] text-gray-300 hover:border-yellow-400 hover:text-yellow-400"
+    } ${small ? "px-2 py-1 text-[10px]" : "px-3 py-1.5 text-xs"} ${disabled ? "opacity-30 cursor-not-allowed" : "cursor-pointer"} ${className}`}
+    style={{ borderRadius: 2 }}>
+    {children}
+  </button>
+);
+
+const Stat = ({ label, value, unit, className = "" }) => (
+  <div className={className}>
+    <div className="text-[9px] uppercase tracking-[0.15em] font-mono text-gray-500 mb-0.5">{label}</div>
+    <div className="font-mono text-gray-100">
+      <span className="text-lg">{value}</span>
+      {unit && <span className="text-[10px] text-gray-500 ml-1">{unit}</span>}
+    </div>
+  </div>
+);
+
+const RiderSelect = ({ value, onChange, riders, placeholder = "未割当", small = false }) => {
+  const selected = riders.find((r) => r.id === value);
+  return (
+    <div className="relative inline-block">
+      <select value={value || ""} onChange={(e) => onChange(e.target.value || null)}
+        className={`appearance-none bg-[#0a0e14] border border-[#252d3a] text-gray-200 font-mono pr-6 cursor-pointer hover:border-yellow-400 focus:border-yellow-400 outline-none ${small ? "py-0.5 text-[10px]" : "py-1 text-xs"}`}
+        style={{ borderRadius: 2, paddingLeft: selected ? 18 : 8 }}>
+        <option value="">{placeholder}</option>
+        {riders.map((r) => (<option key={r.id} value={r.id}>{r.name}</option>))}
+      </select>
+      {selected && (<div className="absolute left-2 top-1/2 -translate-y-1/2 w-2 h-2 pointer-events-none" style={{ background: selected.color }}></div>)}
+      <ChevronDown size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-gray-500 pointer-events-none" />
+    </div>
+  );
+};
+
+// ─── GPS track plot ──────────────────────────────────────────────
+const TrackPlot = ({ lap, lat0, lon0, colorBy = "speed", engineType = "4st", overlay = null, cursorSample = null, overlayCursorSample = null, height = 380, lapRef = null, lapLineEditMode = false, onSetLapLine = null }) => {
+  if (!lap || !lap.samples.length) return null;
+  const pts = lap.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0)
+    .map((s) => { const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
+                  return { x, y, speed: s.Speed, rpm: s.Rpm, afr: s.Afr, t: s.LapRunTime }; });
+  if (!pts.length) return null;
+
+  const xs = pts.map((p) => p.x), ys = pts.map((p) => p.y);
+  let xmin = Math.min(...xs), xmax = Math.max(...xs);
+  let ymin = Math.min(...ys), ymax = Math.max(...ys);
+  if (overlay) {
+    overlay.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0).forEach((s) => {
+      const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
+      xmin = Math.min(xmin, x); xmax = Math.max(xmax, x);
+      ymin = Math.min(ymin, y); ymax = Math.max(ymax, y);
+    });
+  }
+  const pad = 30, w = 800, h = height;
+  const dx = xmax - xmin || 1, dy = ymax - ymin || 1;
+  const sx = (w - 2 * pad) / dx, sy = (h - 2 * pad) / dy;
+  const sc = Math.min(sx, sy);
+  const ox = pad + ((w - 2 * pad) - dx * sc) / 2 - xmin * sc;
+  const oy = h - (pad + ((h - 2 * pad) - dy * sc) / 2 - ymin * sc);
+  const proj = (x, y) => [x * sc + ox, oy - y * sc];
+
+  const speeds = pts.map((p) => p.speed); const sMin = Math.min(...speeds), sMax = Math.max(...speeds);
+  const colorFor = (val) => {
+    if (colorBy === "rpm") return rpmColor(val, engineType);
+    if (colorBy === "afr") return afrColor(val, engineType);
+    const t = (val - sMin) / (sMax - sMin || 1); return `hsl(${280 - t * 280}, 85%, ${30 + t * 30}%)`;
+  };
+
+  // Build legend for RPM mode based on the engine stops
+  const rpmStops = RPM_STOPS[engineType] || RPM_STOPS["4st"];
+  const afrTarget = AFR_TARGETS[engineType] || AFR_TARGETS["4st"];
+
+  const colorByValue = (p) => {
+    if (colorBy === "rpm") return p.rpm;
+    if (colorBy === "afr") return p.afr;
+    return p.speed;
+  };
+
+  // Convert SVG click position back to lat/lon (inverse of proj + llToMeters)
+  const handleSvgClick = (e) => {
+    if (!lapLineEditMode || !onSetLapLine) return;
+    const svg = e.currentTarget;
+    const rect = svg.getBoundingClientRect();
+    // Map client (px) to SVG viewBox coords
+    const px = ((e.clientX - rect.left) / rect.width) * w;
+    const py = ((e.clientY - rect.top) / rect.height) * h;
+    // Invert proj: [px, py] = [x*sc+ox, oy-y*sc] → x = (px-ox)/sc, y = (oy-py)/sc
+    const xMeters = (px - ox) / sc;
+    const yMeters = (oy - py) / sc;
+    // Invert llToMeters
+    const newLat = lat0 + yMeters / 111320;
+    const newLon = lon0 + xMeters / (111320 * Math.cos(lat0 * Math.PI / 180));
+    onSetLapLine(newLat, newLon);
+  };
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG, cursor: lapLineEditMode ? "crosshair" : "default" }}
+         onClick={handleSvgClick}>
+      {[...Array(8)].map((_, i) => (<line key={`vx${i}`} x1={(i * w) / 8} y1={0} x2={(i * w) / 8} y2={h} stroke={STROKE} strokeWidth={0.5} opacity={0.5} />))}
+      {[...Array(5)].map((_, i) => (<line key={`vy${i}`} x1={0} y1={(i * h) / 5} x2={w} y2={(i * h) / 5} stroke={STROKE} strokeWidth={0.5} opacity={0.5} />))}
+      {lapLineEditMode && (
+        <text x={w / 2} y={20} textAnchor="middle" fill="#facc15" fontSize={11} fontFamily="monospace" fontWeight="bold"
+              style={{ paintOrder: "stroke", stroke: "#000000", strokeWidth: 3 }}>
+          ▼ クリックでスタートフィニッシュラインを設定
+        </text>
+      )}
+      {overlay && overlay.samples.filter((s) => s.Latitude > 0 && s.Longitude > 0).map((s, i) => {
+        const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0, lon0);
+        const [px, py] = proj(x, y);
+        return <circle key={`o${i}`} cx={px} cy={py} r={1.4} fill={FG_MUTE} opacity={0.35} />;
+      })}
+      {pts.map((p, i) => { const [px, py] = proj(p.x, p.y);
+        return <circle key={i} cx={px} cy={py} r={2} fill={colorFor(colorByValue(p))} />; })}
+      {(() => {
+        const [sx0, sy0] = proj(pts[0].x, pts[0].y);
+        const [ex, ey] = proj(pts[pts.length - 1].x, pts[pts.length - 1].y);
+        return (<>
+          <circle cx={sx0} cy={sy0} r={6} fill="none" stroke="#22d3ee" strokeWidth={2} />
+          <circle cx={ex} cy={ey} r={6} fill="none" stroke={ACCENT} strokeWidth={2} />
+          <text x={sx0 + 10} y={sy0 + 4} fill="#22d3ee" fontSize={9} fontFamily="monospace">START</text>
+          <text x={ex + 10} y={ey + 4} fill={ACCENT} fontSize={9} fontFamily="monospace">END</text>
+        </>);
+      })()}
+      {/* Animation cursor for compare lap (overlay, cyan) - draw under main */}
+      {overlayCursorSample && overlayCursorSample.Latitude > 0 && (() => {
+        const [x, y] = llToMeters(overlayCursorSample.Latitude, overlayCursorSample.Longitude, lat0, lon0);
+        const [px, py] = proj(x, y);
+        return (
+          <g>
+            <circle cx={px} cy={py} r={12} fill="none" stroke="#22d3ee" strokeWidth={1.5} opacity={0.4} />
+            <circle cx={px} cy={py} r={6} fill="#22d3ee" stroke="#0a0e14" strokeWidth={1.5} />
+          </g>
+        );
+      })()}
+      {/* Lap reference marker (S/F line position auto-detected) */}
+      {lapRef && lapRef.Latitude && (() => {
+        const [x, y] = llToMeters(lapRef.Latitude, lapRef.Longitude, lat0, lon0);
+        const [px, py] = proj(x, y);
+        // 50m detection radius circle (matches NEAR_M in detector)
+        const rPx = 50 * sc;
+        return (
+          <g>
+            {/* Detection radius (faint) */}
+            <circle cx={px} cy={py} r={rPx} fill="none" stroke="#ffffff" strokeWidth={0.8} strokeDasharray="3,3" opacity={0.35} />
+            {/* Center marker — checkered flag look (4-square pattern) */}
+            <rect x={px - 6} y={py - 6} width={6} height={6} fill="#ffffff" />
+            <rect x={px}     y={py - 6} width={6} height={6} fill="#000000" />
+            <rect x={px - 6} y={py}     width={6} height={6} fill="#000000" />
+            <rect x={px}     y={py}     width={6} height={6} fill="#ffffff" />
+            <rect x={px - 6} y={py - 6} width={12} height={12} fill="none" stroke="#ffffff" strokeWidth={1} />
+            <text x={px + 10} y={py - 6} fill="#ffffff" fontSize={10} fontFamily="monospace" fontWeight="bold"
+                  style={{ paintOrder: "stroke", stroke: "#000000", strokeWidth: 2.5 }}>
+              S/F
+            </text>
+          </g>
+        );
+      })()}
+      {/* Animation cursor for main lap (yellow) */}
+      {cursorSample && cursorSample.Latitude > 0 && (() => {
+        const [x, y] = llToMeters(cursorSample.Latitude, cursorSample.Longitude, lat0, lon0);
+        const [px, py] = proj(x, y);
+        return (
+          <g>
+            <circle cx={px} cy={py} r={14} fill="none" stroke={ACCENT} strokeWidth={1.5} opacity={0.5} />
+            <circle cx={px} cy={py} r={7} fill={ACCENT} stroke="#0a0e14" strokeWidth={1.5} />
+          </g>
+        );
+      })()}
+      {colorBy === "rpm" ? (
+        <g transform={`translate(${w - 200}, 20)`}>
+          <text x={0} y={-5} fill={FG_MUTE} fontSize={9} fontFamily="monospace">RPM · {engineType.toUpperCase()}</text>
+          {[...Array(40)].map((_, i) => {
+            const t = i / 39;
+            const r = rpmStops.low + t * (rpmStops.high - rpmStops.low);
+            return <rect key={i} x={i * 4.5} y={0} width={4.6} height={6} fill={rpmColor(r, engineType)} />;
+          })}
+          <line x1={((rpmStops.mid - rpmStops.low) / (rpmStops.high - rpmStops.low)) * 180} y1={-2} x2={((rpmStops.mid - rpmStops.low) / (rpmStops.high - rpmStops.low)) * 180} y2={8} stroke={FG} strokeWidth={0.5} />
+          <text x={0} y={20} fill={FG_DIM} fontSize={9} fontFamily="monospace">{rpmStops.low.toLocaleString()}</text>
+          <text x={((rpmStops.mid - rpmStops.low) / (rpmStops.high - rpmStops.low)) * 180} y={20} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">{rpmStops.mid.toLocaleString()}</text>
+          <text x={180} y={20} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{rpmStops.high.toLocaleString()}</text>
+        </g>
+      ) : colorBy === "afr" ? (
+        <g transform={`translate(${w - 220}, 20)`}>
+          <text x={0} y={-5} fill={FG_MUTE} fontSize={9} fontFamily="monospace">A/F · {engineType.toUpperCase()} · target {afrTarget.mid}</text>
+          {[...Array(60)].map((_, i) => {
+            const t = i / 59;
+            const a = AFR_MIN + t * (AFR_MAX - AFR_MIN);
+            return <rect key={i} x={i * 3.3} y={0} width={3.4} height={6} fill={afrColor(a, engineType)} />;
+          })}
+          {/* Tick marks for target band */}
+          {[afrTarget.low, afrTarget.mid, afrTarget.high].map((v, i) => {
+            const x = ((v - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 198;
+            return <line key={i} x1={x} y1={-2} x2={x} y2={8} stroke={FG} strokeWidth={i === 1 ? 1 : 0.5} />;
+          })}
+          <text x={0} y={20} fill={FG_DIM} fontSize={9} fontFamily="monospace">{AFR_MIN.toFixed(1)}</text>
+          <text x={((afrTarget.mid - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 198} y={20} textAnchor="middle" fill={ACCENT} fontSize={9} fontFamily="monospace">{afrTarget.mid.toFixed(1)}</text>
+          <text x={198} y={20} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{AFR_MAX.toFixed(1)}</text>
+        </g>
+      ) : (
+        <g transform={`translate(${w - 130}, 20)`}>
+          <text x={0} y={-5} fill={FG_MUTE} fontSize={9} fontFamily="monospace">SPEED km/h</text>
+          {[0, 0.25, 0.5, 0.75, 1].map((t, i) => (
+            <rect key={i} x={i * 24} y={0} width={24} height={6} fill={`hsl(${280 - t * 280}, 85%, ${30 + t * 30}%)`} />
+          ))}
+          <text x={0} y={20} fill={FG_DIM} fontSize={9} fontFamily="monospace">{fmtNum(sMin, 0)}</text>
+          <text x={120} y={20} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{fmtNum(sMax, 0)}</text>
+        </g>
+      )}
+    </svg>
+  );
+};
+
+const TracePlot = ({ lapA, lapB, mode = "speed", height = 280, label, cursorSampleA = null, cursorSampleB = null }) => {
+  if (!lapA) return null;
+  const w = 800, h = height, pad = { l: 50, r: 20, t: 20, b: 30 };
+  const distOf = (lap) => {
+    let d = 0; let lastLat = null, lastLon = null;
+    const lat0Lap = lap.samples.find((s) => s.Latitude > 0)?.Latitude || 0;
+    const lon0Lap = lap.samples.find((s) => s.Longitude > 0)?.Longitude || 0;
+    return lap.samples.map((s) => {
+      if (s.Latitude > 0) {
+        if (lastLat !== null) {
+          const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0Lap, lon0Lap);
+          const [lx, ly] = llToMeters(lastLat, lastLon, lat0Lap, lon0Lap);
+          d += Math.hypot(x - lx, y - ly);
+        }
+        lastLat = s.Latitude; lastLon = s.Longitude;
+      }
+      return { d, v: mode === "speed" ? s.Speed : s.Rpm, t: s.LapRunTime, runTime: s.RunTime };
+    });
+  };
+  const a = distOf(lapA);
+  const b = lapB ? distOf(lapB) : null;
+  const allD = [...a.map((p) => p.d), ...(b ? b.map((p) => p.d) : [])];
+  const allV = [...a.map((p) => p.v), ...(b ? b.map((p) => p.v) : [])];
+  const dMax = Math.max(...allD), dMin = 0;
+  const vMin = mode === "speed" ? 0 : Math.max(0, Math.min(...allV) - 500);
+  const vMax = Math.max(...allV) * 1.05;
+  const sx = (d) => pad.l + ((d - dMin) / (dMax - dMin)) * (w - pad.l - pad.r);
+  const sy = (v) => h - pad.b - ((v - vMin) / (vMax - vMin)) * (h - pad.t - pad.b);
+  const pathOf = (arr) => arr.map((p, i) => `${i ? "L" : "M"}${sx(p.d).toFixed(1)},${sy(p.v).toFixed(1)}`).join("");
+  const yTicks = mode === "speed" ? [0, 25, 50, 75, 100] : [0, 5000, 10000, 15000];
+
+  // Find distance for cursor: locate sample by RunTime match in our distOf array
+  const cursorDistFor = (lap, sampleArr, cursorSample) => {
+    if (!cursorSample) return null;
+    const idx = lap.samples.indexOf(cursorSample);
+    if (idx < 0 || idx >= sampleArr.length) return null;
+    return sampleArr[idx];
+  };
+  const cursorA = cursorDistFor(lapA, a, cursorSampleA);
+  const cursorB = lapB ? cursorDistFor(lapB, b, cursorSampleB) : null;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
+      {yTicks.map((v) => v >= vMin && v <= vMax ? (
+        <g key={v}>
+          <line x1={pad.l} y1={sy(v)} x2={w - pad.r} y2={sy(v)} stroke={STROKE} strokeWidth={0.5} />
+          <text x={pad.l - 6} y={sy(v) + 3} fill={FG_MUTE} fontSize={9} fontFamily="monospace" textAnchor="end">{v}</text>
+        </g>) : null)}
+      {[0, 0.25, 0.5, 0.75, 1].map((t, i) => (
+        <text key={i} x={pad.l + t * (w - pad.l - pad.r)} y={h - pad.b + 14} fill={FG_MUTE} fontSize={9} fontFamily="monospace" textAnchor="middle">{(t * dMax).toFixed(0)}m</text>
+      ))}
+      {b && <path d={pathOf(b)} fill="none" stroke="#22d3ee" strokeWidth={1.3} opacity={0.85} />}
+      <path d={pathOf(a)} fill="none" stroke={ACCENT} strokeWidth={1.5} />
+      {/* Cursor: vertical line + dot at current sample */}
+      {cursorB && (
+        <g>
+          <line x1={sx(cursorB.d)} y1={pad.t} x2={sx(cursorB.d)} y2={h - pad.b} stroke="#22d3ee" strokeWidth={0.6} opacity={0.5} />
+          <circle cx={sx(cursorB.d)} cy={sy(cursorB.v)} r={4} fill="#22d3ee" stroke="#0a0e14" strokeWidth={1} />
+        </g>
+      )}
+      {cursorA && (
+        <g>
+          <line x1={sx(cursorA.d)} y1={pad.t} x2={sx(cursorA.d)} y2={h - pad.b} stroke={ACCENT} strokeWidth={0.8} opacity={0.7} />
+          <circle cx={sx(cursorA.d)} cy={sy(cursorA.v)} r={4.5} fill={ACCENT} stroke="#0a0e14" strokeWidth={1} />
+          <text x={sx(cursorA.d) + 6} y={pad.t + 10} fill={ACCENT} fontSize={9} fontFamily="monospace">
+            {cursorA.d.toFixed(0)}m
+          </text>
+        </g>
+      )}
+      {label && <text x={pad.l + 6} y={pad.t + 12} fill={FG_DIM} fontSize={10} fontFamily="monospace">{label}</text>}
+    </svg>
+  );
+};
+
+// ─── Multi-metric trace plot (Speed + RPM + A/F unified) ────────
+// Drogger-style: shared distance axis, 3 metrics overlaid with their own scales,
+// color-coded. Reference lap solid, compare lap dashed.
+const MULTI_METRICS = [
+  { key: "Speed", short: "SPD", label: "km/h", color: "#facc15", fmt: (v) => v.toFixed(1) },
+  { key: "Rpm",   short: "RPM", label: "rpm",  color: "#22d3ee", fmt: (v) => v.toFixed(0) },
+  { key: "Afr",   short: "A/F", label: "",     color: "#84cc16", fmt: (v) => v.toFixed(2) },
+];
+
+const MultiTracePlot = ({ lapA, lapB = null, cursorSampleA = null, cursorSampleB = null, hasAfr = false, height = 360, isMobile = false }) => {
+  if (!lapA) return null;
+  const w = 800, h = height, pad = { l: 12, r: 12, t: 38, b: 28 };
+
+  const distOf = (lap) => {
+    let d = 0; let lastLat = null, lastLon = null;
+    const lat0Lap = lap.samples.find((s) => s.Latitude > 0)?.Latitude || 0;
+    const lon0Lap = lap.samples.find((s) => s.Longitude > 0)?.Longitude || 0;
+    return lap.samples.map((s) => {
+      if (s.Latitude > 0) {
+        if (lastLat !== null) {
+          const [x, y] = llToMeters(s.Latitude, s.Longitude, lat0Lap, lon0Lap);
+          const [lx, ly] = llToMeters(lastLat, lastLon, lat0Lap, lon0Lap);
+          d += Math.hypot(x - lx, y - ly);
+        }
+        lastLat = s.Latitude; lastLon = s.Longitude;
+      }
+      return { d, Speed: s.Speed, Rpm: s.Rpm, Afr: s.Afr };
+    });
+  };
+
+  const a = distOf(lapA);
+  const b = lapB ? distOf(lapB) : null;
+  const allD = [...a.map((p) => p.d), ...(b ? b.map((p) => p.d) : [])];
+  const dMax = Math.max(...allD) || 1;
+  const sx = (d) => pad.l + (d / dMax) * (w - pad.l - pad.r);
+
+  const metrics = MULTI_METRICS.filter((m) => m.key !== "Afr" || hasAfr);
+  const scales = metrics.map((m) => {
+    let min, max;
+    if (m.key === "Afr") { min = AFR_MIN; max = AFR_MAX; }
+    else if (m.key === "Speed") {
+      const allVals = [...a.map((p) => p.Speed), ...(b ? b.map((p) => p.Speed) : [])];
+      min = 0; max = Math.max(Math.max(...allVals) * 1.05, 50);
+    } else { // Rpm
+      const allVals = [...a.map((p) => p.Rpm), ...(b ? b.map((p) => p.Rpm) : [])];
+      min = 0; max = Math.max(Math.max(...allVals) * 1.05, 5000);
+    }
+    return { ...m, min, max };
+  });
+
+  const syFor = (val, scale) => h - pad.b - ((val - scale.min) / (scale.max - scale.min)) * (h - pad.t - pad.b);
+  const pathOf = (arr, scale) =>
+    arr.map((p, i) => `${i ? "L" : "M"}${sx(p.d).toFixed(1)},${syFor(p[scale.key], scale).toFixed(1)}`).join("");
+
+  const cursorAt = (lap, sampleArr, cursorSample) => {
+    if (!cursorSample) return null;
+    const idx = lap.samples.indexOf(cursorSample);
+    if (idx < 0 || idx >= sampleArr.length) return null;
+    return sampleArr[idx];
+  };
+  const cursorA = cursorAt(lapA, a, cursorSampleA);
+  const cursorB = lapB ? cursorAt(lapB, b, cursorSampleB) : null;
+
+  // Top legend: chip per metric with name + range; current cursor value if available
+  const chipWidth = (w - pad.l - pad.r) / scales.length;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
+      {/* Top legend strip */}
+      {scales.map((scale, i) => {
+        const cx = pad.l + i * chipWidth;
+        const fmtRange = (() => {
+          if (scale.key === "Afr") return `${scale.min.toFixed(1)}-${scale.max.toFixed(1)}`;
+          if (scale.key === "Rpm") return `0-${(scale.max / 1000).toFixed(1)}k`;
+          return `0-${scale.max.toFixed(0)}`;
+        })();
+        return (
+          <g key={scale.key} transform={`translate(${cx}, 6)`}>
+            <rect x={0} y={0} width={9} height={9} fill={scale.color} />
+            <text x={14} y={9} fill={scale.color} fontSize={11} fontFamily="monospace" fontWeight="bold">{scale.short}</text>
+            <text x={48} y={9} fill={FG_DIM} fontSize={9} fontFamily="monospace">
+              {fmtRange}{scale.label ? ` ${scale.label}` : ""}
+            </text>
+            {cursorA && (
+              <text x={chipWidth - 8} y={9} textAnchor="end" fill={scale.color} fontSize={11} fontFamily="monospace" fontWeight="bold">
+                {scale.fmt(cursorA[scale.key])}
+                {cursorB ? <tspan fill="#22d3ee" opacity={0.85}> / {scale.fmt(cursorB[scale.key])}</tspan> : ""}
+              </text>
+            )}
+          </g>
+        );
+      })}
+
+      {/* Horizontal grid (visual separation only, no specific values) */}
+      {[0.25, 0.5, 0.75].map((t, i) => (
+        <line key={i} x1={pad.l} y1={pad.t + t * (h - pad.t - pad.b)} x2={w - pad.r} y2={pad.t + t * (h - pad.t - pad.b)} stroke={STROKE} strokeWidth={0.4} />
+      ))}
+
+      {/* Vertical grid */}
+      {[0.25, 0.5, 0.75].map((t, i) => (
+        <line key={i} x1={pad.l + t * (w - pad.l - pad.r)} y1={pad.t} x2={pad.l + t * (w - pad.l - pad.r)} y2={h - pad.b} stroke={STROKE} strokeWidth={0.3} />
+      ))}
+
+      {/* Distance ticks */}
+      {[0, 0.25, 0.5, 0.75, 1].map((t, i) => (
+        <text key={i} x={pad.l + t * (w - pad.l - pad.r)} y={h - pad.b + 14} fill={FG_MUTE} fontSize={9} fontFamily="monospace"
+          textAnchor={i === 0 ? "start" : i === 4 ? "end" : "middle"}>
+          {(t * dMax).toFixed(0)}m
+        </text>
+      ))}
+
+      {/* Lines: compare lap first (dashed, dimmed) so reference draws on top */}
+      {b && scales.map((scale) => (
+        <path key={`b-${scale.key}`} d={pathOf(b, scale)} fill="none" stroke={scale.color} strokeWidth={1.2} strokeDasharray="4 3" opacity={0.6} />
+      ))}
+      {scales.map((scale) => (
+        <path key={`a-${scale.key}`} d={pathOf(a, scale)} fill="none" stroke={scale.color} strokeWidth={1.6} />
+      ))}
+
+      {/* Cursors */}
+      {cursorB && (
+        <g>
+          <line x1={sx(cursorB.d)} y1={pad.t} x2={sx(cursorB.d)} y2={h - pad.b} stroke="#22d3ee" strokeWidth={0.6} opacity={0.55} strokeDasharray="3 2" />
+          {scales.map((scale) => (
+            <circle key={scale.key} cx={sx(cursorB.d)} cy={syFor(cursorB[scale.key], scale)} r={3} fill={scale.color} stroke="#0a0e14" strokeWidth={1} opacity={0.75} />
+          ))}
+        </g>
+      )}
+      {cursorA && (
+        <g>
+          <line x1={sx(cursorA.d)} y1={pad.t} x2={sx(cursorA.d)} y2={h - pad.b} stroke={ACCENT} strokeWidth={0.8} opacity={0.8} />
+          {scales.map((scale) => (
+            <circle key={scale.key} cx={sx(cursorA.d)} cy={syFor(cursorA[scale.key], scale)} r={4} fill={scale.color} stroke="#0a0e14" strokeWidth={1.2} />
+          ))}
+          <text x={sx(cursorA.d) + 6} y={pad.t - 4} fill={ACCENT} fontSize={9} fontFamily="monospace">{cursorA.d.toFixed(0)}m</text>
+        </g>
+      )}
+    </svg>
+  );
+};
+
+const LapTimesChart = ({ session, lookupRiderForLap, onLapClick, selectedLap, height = 320 }) => {
+  if (!session) return null;
+  const w = 800, h = height, pad = { l: 60, r: 20, t: 20, b: 40 };
+  const racing = session.laps.filter((l) => l.isRacing);
+  if (!racing.length) return <div className="text-gray-500 p-6 text-center text-sm font-mono">レーシングラップが検出できません</div>;
+  const tMax = Math.max(...racing.map((l) => l.duration)) * 1.05;
+  const tMin = Math.min(...racing.map((l) => l.duration)) * 0.95;
+  const xMax = Math.max(...racing.map((l) => l.endTime));
+  const sx = (t) => pad.l + (t / xMax) * (w - pad.l - pad.r);
+  const sy = (d) => h - pad.b - ((d - tMin) / (tMax - tMin)) * (h - pad.t - pad.b);
+  const bestDur = Math.min(...racing.map((l) => l.duration));
+  const yStep = Math.max(1, Math.ceil((tMax - tMin) / 5));
+  const yTicks = [];
+  for (let v = Math.ceil(tMin); v <= tMax; v += yStep) yTicks.push(v);
+  const xTicks = [];
+  for (let m = 0; m * 60 <= xMax; m += Math.max(1, Math.floor(xMax / 60 / 8))) xTicks.push(m * 60);
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
+      {yTicks.map((v) => (
+        <g key={`y${v}`}>
+          <line x1={pad.l} y1={sy(v)} x2={w - pad.r} y2={sy(v)} stroke={STROKE} strokeWidth={0.5} />
+          <text x={pad.l - 8} y={sy(v) + 3} fill={FG_MUTE} fontSize={10} fontFamily="monospace" textAnchor="end">{fmtTime(v)}</text>
+        </g>
+      ))}
+      {xTicks.map((t) => (
+        <g key={`x${t}`}>
+          <line x1={sx(t)} y1={pad.t} x2={sx(t)} y2={h - pad.b} stroke={STROKE} strokeWidth={0.3} opacity={0.5} />
+          <text x={sx(t)} y={h - pad.b + 14} fill={FG_MUTE} fontSize={9} fontFamily="monospace" textAnchor="middle">{Math.floor(t / 60)}m</text>
+        </g>
+      ))}
+      <line x1={pad.l} y1={sy(bestDur)} x2={w - pad.r} y2={sy(bestDur)} stroke={ACCENT} strokeWidth={0.5} strokeDasharray="3 3" opacity={0.6} />
+      <text x={w - pad.r - 4} y={sy(bestDur) - 4} fill={ACCENT} fontSize={9} fontFamily="monospace" textAnchor="end">BEST {fmtTime(bestDur)}</text>
+      {racing.map((lap) => {
+        const r = lookupRiderForLap(lap.lap);
+        const color = r ? r.color : FG_MUTE;
+        const isSelected = selectedLap === lap.lap;
+        const isBest = lap.duration === bestDur;
+        return (
+          <g key={lap.lap} className="cursor-pointer" onClick={() => onLapClick && onLapClick(lap.lap)}>
+            <circle cx={sx(lap.endTime)} cy={sy(lap.duration)} r={isSelected ? 6 : isBest ? 5 : 3.5}
+              fill={isBest ? ACCENT : color} stroke={isSelected ? FG : "none"} strokeWidth={isSelected ? 2 : 0} opacity={r ? 0.95 : 0.5} />
+            {(isBest || isSelected) && (
+              <text x={sx(lap.endTime)} y={sy(lap.duration) - 9} fill={FG} fontSize={9} fontFamily="monospace" textAnchor="middle">L{lap.lap}</text>
+            )}
+          </g>
+        );
+      })}
+      <text x={pad.l} y={pad.t + 10} fill={FG_DIM} fontSize={10} fontFamily="monospace">LAP TIME ↑   ELAPSED TIME →</text>
+    </svg>
+  );
+};
+
+const PaceEvolution = ({ session, height = 200 }) => {
+  if (!session) return null;
+  const w = 800, h = height, pad = { l: 60, r: 20, t: 20, b: 30 };
+  const racing = session.laps.filter((l) => l.isRacing);
+  if (racing.length < 3) return null;
+  const tMax = Math.max(...racing.map((l) => l.duration)) * 1.05;
+  const tMin = Math.min(...racing.map((l) => l.duration)) * 0.95;
+  const xMax = Math.max(...racing.map((l) => l.endTime));
+  const sx = (t) => pad.l + (t / xMax) * (w - pad.l - pad.r);
+  const sy = (d) => h - pad.b - ((d - tMin) / (tMax - tMin)) * (h - pad.t - pad.b);
+  const win = 3;
+  const rolling = racing.map((lap, i) => {
+    const lo = Math.max(0, i - Math.floor(win / 2));
+    const hi = Math.min(racing.length, lo + win);
+    const slice = racing.slice(lo, hi);
+    return { t: lap.endTime, v: slice.reduce((a, l) => a + l.duration, 0) / slice.length };
+  });
+  const path = rolling.map((p, i) => `${i ? "L" : "M"}${sx(p.t).toFixed(1)},${sy(p.v).toFixed(1)}`).join("");
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ background: BG }}>
+      {[tMin, (tMin + tMax) / 2, tMax].map((v) => (
+        <g key={v}>
+          <line x1={pad.l} y1={sy(v)} x2={w - pad.r} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+          <text x={pad.l - 6} y={sy(v) + 3} fill={FG_MUTE} fontSize={9} fontFamily="monospace" textAnchor="end">{fmtTime(v)}</text>
+        </g>
+      ))}
+      <path d={path} fill="none" stroke="#22d3ee" strokeWidth={1.5} />
+      {racing.map((lap, i) => (<circle key={i} cx={sx(lap.endTime)} cy={sy(lap.duration)} r={1.5} fill={FG_DIM} opacity={0.5} />))}
+    </svg>
+  );
+};
+
+// ─── Responsive: detect mobile (< 768px) ─────────────────────────
+const useIsMobile = (breakpoint = 768) => {
+  const [isMobile, setIsMobile] = useState(typeof window !== "undefined" ? window.innerWidth < breakpoint : false);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth < breakpoint);
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, [breakpoint]);
+  return isMobile;
+};
+
+// ─── Main app ────────────────────────────────────────────────────
+function DroggerAnalyzer() {
+  const [sessions, setSessions] = useState([]);
+  const [activeSessionId, setActiveSessionId] = useState(null);
+  const [riders, setRiders] = useState([]);
+  const [stintAssignments, setStintAssignments] = useState({});
+  const [activeTab, setActiveTab] = useState("overview");
+  const [selectedLap, setSelectedLap] = useState(null);
+  const [compareLap, setCompareLap] = useState(null);
+  const [parseError, setParseError] = useState(null);
+  // Lap line edit mode (manual override of auto-detected S/F position)
+  const [lapLineEditMode, setLapLineEditMode] = useState(false);
+  // Lap selection view mode: "chips" (compact buttons) or "table" (full stats)
+  const [lapView, setLapView] = useState("table");
+  // Playback (animation) state
+  const [playbackProgress, setPlaybackProgress] = useState(0);   // 0-1
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);          // 0.25 / 0.5 / 1 / 2 / 4
+  // Mobile responsive
+  const isMobile = useIsMobile();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [aboutOpen, setAboutOpen] = useState(false);
+  const fileInputRef = useRef(null);
+
+  const activeSession = sessions.find((s) => s.id === activeSessionId);
+  // Fallback active tab if it requires capabilities the current session lacks
+  useEffect(() => {
+    if (!activeSession) return;
+    if ((activeTab === "track" || activeTab === "compare") && !activeSession.hasGps) {
+      setActiveTab("overview");
+    }
+    if (activeTab === "tuning" && !activeSession.hasAfr) {
+      setActiveTab("overview");
+    }
+  }, [activeSession?.id, activeSession?.hasGps, activeSession?.hasAfr, activeTab]);
+  const activeStintMap = activeSession ? (stintAssignments[activeSession.id] || {}) : {};
+
+  const handleFiles = useCallback(async (fileList) => {
+    setParseError(null);
+    const files = Array.from(fileList);
+    const newSessions = [];
+    for (const file of files) {
+      try {
+        // Warn for very large files (especially aRacer SP smartphone logs which can exceed 100MB)
+        if (file.size > 80 * 1024 * 1024) {
+          console.warn(`Large file: ${file.name} (${(file.size/1024/1024).toFixed(0)}MB) — parsing may take a while`);
+        }
+        const text = await readFileAsText(file);
+        const fmt = detectLogFormat(text);
+
+        const lc = file.name.toLowerCase();
+        const isRace = lc.includes("race") || file.name.includes("本番");
+        const isQual = lc.includes("qual") || file.name.includes("予選");
+        const type = isRace ? "race" : isQual ? "qualifying" : "practice";
+        const baseName = file.name.replace(/\.(csv|loga)$/i, "");
+
+        if (fmt === "drogger") {
+          const parsed = Papa.parse(text, { header: true, dynamicTyping: true, skipEmptyLines: true });
+          if (!parsed.data.length || !("Lap" in parsed.data[0])) {
+            setParseError(`${file.name}: Drogger CSVではないようです（Lap列がありません）`);
+            continue;
+          }
+          const session = parseSession(parsed.data, baseName, type, { source: "drogger", hasGps: true });
+          newSessions.push(session);
+        } else if (fmt === "aracer_sp" || fmt === "aracer_ecu" || fmt === "aracer_lm") {
+          const { data, hasGps } = parseAracerLog(text, fmt);
+          if (!data.length) {
+            setParseError(`${file.name}: aRacer ログのデータが空です`);
+            continue;
+          }
+          // For aRacer LM with valid GPS but empty IR_LapNumber: detect laps from GPS trajectory
+          const allZeroLap = data.every((r) => r.Lap === 0);
+          let lapRef = null;
+          if (hasGps && allZeroLap) {
+            lapRef = detectLapsFromGps(data);
+          }
+          const session = parseSession(data, baseName, type, { source: fmt, hasGps, lapRef });
+          newSessions.push(session);
+        } else {
+          setParseError(`${file.name}: 認識できないログ形式です（Drogger CSV または aRacer .loga が対象）`);
+          continue;
+        }
+      } catch (e) { setParseError(`${file.name}: ${e.message}`); }
+    }
+    if (newSessions.length) {
+      setSessions((prev) => [...prev, ...newSessions]);
+      if (!activeSessionId) setActiveSessionId(newSessions[0].id);
+      setStintAssignments((sa) => {
+        const next = { ...sa };
+        newSessions.forEach((s) => { if (!next[s.id]) next[s.id] = {}; });
+        return next;
+      });
+      setRiders((rs) => rs.length === 0 ? [{ id: newId(), name: "Rider 1", color: RIDER_COLORS[0] }] : rs);
+    }
+  }, [activeSessionId]);
+
+  const removeSession = (id) => {
+    setSessions((s) => s.filter((x) => x.id !== id));
+    if (activeSessionId === id) setActiveSessionId(sessions.find((s) => s.id !== id)?.id || null);
+    setStintAssignments((sa) => { const c = { ...sa }; delete c[id]; return c; });
+  };
+
+  const setSessionEngineType = (id, engineType) => {
+    setSessions((ss) => ss.map((s) => (s.id === id ? { ...s, engineType } : s)));
+  };
+
+  // Manually override the lap line (called when user clicks on Track plot
+  // in edit mode). Only enabled for sessions where lap detection was GPS-based
+  // to begin with (aRacer LM) — meaning lapRef exists. For Drogger / aRacer
+  // SP/ECU, the edit UI is hidden, so this is never called for those.
+  const handleSetLapLine = useCallback((newLat, newLon) => {
+    if (!activeSessionId) return;
+    setSessions((ss) => ss.map((s) => {
+      if (s.id !== activeSessionId) return s;
+      const newRef = { Latitude: newLat, Longitude: newLon };
+      const result = recomputeLapsForSession(s, newRef);
+      // Sanity check: if the new ref produces too few laps (e.g. user clicked
+      // off the racing line), reject and warn the user
+      if (result.laps.length < Math.max(2, s.laps.length * 0.3)) {
+        alert(`クリック位置からはラップが正しく検出できませんでした (${result.laps.length}周のみ検出)。\nコース上のレーシングライン付近をクリックしてください。`);
+        return s; // keep original
+      }
+      return result;
+    }));
+    setSelectedLap(null);
+    setCompareLap(null);
+    setLapLineEditMode(false);
+  }, [activeSessionId]);
+
+  const addRider = () => {
+    setRiders((rs) => [...rs, { id: newId(), name: `Rider ${rs.length + 1}`, color: RIDER_COLORS[rs.length % RIDER_COLORS.length] }]);
+  };
+  const updateRider = (id, key, val) => setRiders((rs) => rs.map((r) => (r.id === id ? { ...r, [key]: val } : r)));
+  const removeRider = (id) => {
+    setRiders((rs) => rs.filter((r) => r.id !== id));
+    setStintAssignments((sa) => {
+      const next = {};
+      for (const sid of Object.keys(sa)) {
+        next[sid] = {};
+        for (const stintId of Object.keys(sa[sid])) {
+          if (sa[sid][stintId] !== id) next[sid][stintId] = sa[sid][stintId];
+        }
+      }
+      return next;
+    });
+  };
+
+  const assignStintToRider = (sessionId, stintId, riderId) => {
+    setStintAssignments((sa) => {
+      const sessMap = { ...(sa[sessionId] || {}) };
+      if (riderId) sessMap[stintId] = riderId;
+      else delete sessMap[stintId];
+      return { ...sa, [sessionId]: sessMap };
+    });
+  };
+
+  const lookupRiderForLap = useCallback((lapNum) => {
+    if (!activeSession) return null;
+    const stint = activeSession.stints.find((st) => lapNum >= st.startLap && lapNum <= st.endLap);
+    if (!stint) return null;
+    const riderId = activeStintMap[stint.id];
+    if (!riderId) return null;
+    return riders.find((r) => r.id === riderId) || null;
+  }, [activeSession, activeStintMap, riders]);
+
+  const riderStats = useMemo(() => {
+    if (!activeSession) return [];
+    return riders.map((r) => {
+      const myStintIds = Object.keys(activeStintMap).filter((sid) => activeStintMap[sid] === r.id);
+      const myStints = activeSession.stints.filter((st) => myStintIds.includes(st.id));
+      const allLaps = myStints.flatMap((st) => st.laps).filter((l) => l.isRacing);
+      if (!allLaps.length) return { ...r, lapCount: 0, stintCount: myStints.length };
+      const durations = allLaps.map((l) => l.duration).sort((a, b) => a - b);
+      return { ...r, lapCount: allLaps.length, stintCount: myStints.length,
+        bestLap: durations[0], avgLap: durations.reduce((a, b) => a + b, 0) / durations.length,
+        worstLap: durations[durations.length - 1], consistency: durations[durations.length - 1] - durations[0],
+        maxRpm: Math.max(...allLaps.map((l) => l.maxRpm)), maxSpeed: Math.max(...allLaps.map((l) => l.maxSpeed)) };
+    });
+  }, [activeSession, activeStintMap, riders]);
+
+  const theoreticalBest = useMemo(() => {
+    if (!activeSession) return null;
+    const racing = activeSession.laps.filter((l) => l.isRacing);
+    if (racing.length < 2) return null;
+    const N = 6;
+    const sectorBest = new Array(N).fill(Infinity);
+    racing.forEach((lap) => {
+      const sectorDur = lap.duration / N;
+      for (let i = 0; i < N; i++) if (sectorDur < sectorBest[i]) sectorBest[i] = sectorDur;
+    });
+    return { sectors: sectorBest, total: sectorBest.reduce((a, b) => a + b, 0), N };
+  }, [activeSession]);
+
+  const selectedLapObj = activeSession?.laps.find((l) => l.lap === selectedLap);
+  const compareLapObj = activeSession?.laps.find((l) => l.lap === compareLap);
+
+  // Reset playback when lap selection changes
+  useEffect(() => {
+    setPlaybackProgress(0);
+    setIsPlaying(false);
+  }, [selectedLap, compareLap, activeTab]);
+
+  // The wall-clock span that progress 0-1 covers. In Compare mode, the
+  // longer of the two lap durations so both finish within view.
+  const playbackDuration = useMemo(() => {
+    if (!selectedLapObj) return 0;
+    if (activeTab === "compare" && compareLapObj) {
+      return Math.max(selectedLapObj.duration, compareLapObj.duration);
+    }
+    return selectedLapObj.duration;
+  }, [selectedLapObj, compareLapObj, activeTab]);
+
+  // Animation loop using requestAnimationFrame
+  useEffect(() => {
+    if (!isPlaying || !playbackDuration) return;
+    let lastTime = performance.now();
+    let raf;
+    const tick = (now) => {
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+      setPlaybackProgress((p) => {
+        const next = p + (dt * playbackSpeed) / playbackDuration;
+        if (next >= 1) { setIsPlaying(false); return 1; }
+        return next;
+      });
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isPlaying, playbackSpeed, playbackDuration]);
+
+  const togglePlay = () => {
+    if (playbackProgress >= 1) {
+      setPlaybackProgress(0);
+      setIsPlaying(true);
+    } else {
+      setIsPlaying((p) => !p);
+    }
+  };
+  const resetPlay = () => { setPlaybackProgress(0); setIsPlaying(false); };
+
+  const elapsedSec = playbackProgress * playbackDuration;
+  const refCursor = selectedLapObj ? sampleAtElapsed(selectedLapObj, elapsedSec) : null;
+  const cmpCursor = compareLapObj ? sampleAtElapsed(compareLapObj, elapsedSec) : null;
+  // Capped elapsed for each lap (so a fast lap's clock parks at its laptime)
+  const refElapsedDisplay = selectedLapObj ? Math.min(elapsedSec, selectedLapObj.duration) : 0;
+  const cmpElapsedDisplay = compareLapObj ? Math.min(elapsedSec, compareLapObj.duration) : 0;
+
+  return (
+    <div className="min-h-screen w-full" style={{ background: BG, color: FG, fontFamily: "ui-sans-serif, system-ui, -apple-system" }}>
+      <div className="border-b border-[#252d3a] flex items-center justify-between" style={{ background: PANEL, padding: isMobile ? "10px 12px" : "12px 16px" }}>
+        <div className="flex items-center gap-2 min-w-0">
+          {isMobile && (
+            <button onClick={() => setDrawerOpen(true)} className="p-2 -ml-2 text-gray-300 active:text-yellow-400" style={{ touchAction: "manipulation" }}>
+              <Menu size={22} />
+            </button>
+          )}
+          <div className="w-2 h-6" style={{ background: ACCENT }}></div>
+          <div className="min-w-0">
+            <div className="font-mono text-sm tracking-[0.2em] uppercase truncate">{isMobile ? "DROGGER" : "Drogger // Telemetry"}</div>
+            {!isMobile && (
+              <div className="font-mono text-[9px] tracking-wider text-gray-500 uppercase">Endurance Analyzer v{APP_VERSION}</div>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <input ref={fileInputRef} type="file" accept=".csv,.loga,text/plain,text/csv,application/octet-stream" multiple className="hidden"
+            onChange={(e) => { if (e.target.files) handleFiles(e.target.files); }} />
+          <button onClick={() => setAboutOpen(true)} className="p-2 text-gray-400 hover:text-yellow-400 active:text-yellow-400 transition" title="About / バージョン情報" style={{ touchAction: "manipulation" }}>
+            <Info size={isMobile ? 20 : 18} />
+          </button>
+          <Btn onClick={() => fileInputRef.current?.click()} primary>
+            <Upload size={12} className="inline mr-1.5" />{isMobile ? "CSV" : "CSV Load"}
+          </Btn>
+        </div>
+      </div>
+
+      {parseError && (
+        <div className="mx-4 mt-3 px-3 py-2 border border-red-500/40 bg-red-500/10 text-red-300 font-mono text-xs flex items-center gap-2">
+          <AlertCircle size={14} />{parseError}
+        </div>
+      )}
+
+      <div className="flex" style={{ minHeight: "calc(100vh - 60px)" }}>
+        {/* Drawer overlay (mobile only) */}
+        {isMobile && drawerOpen && (
+          <div className="fixed inset-0 z-40 bg-black bg-opacity-60" onClick={() => setDrawerOpen(false)}></div>
+        )}
+        {/* Sidebar (drawer on mobile, fixed-left on desktop) */}
+        <div className={isMobile
+          ? `fixed top-0 left-0 h-full z-50 border-r border-[#252d3a] flex flex-col transition-transform duration-200 ${drawerOpen ? "translate-x-0" : "-translate-x-full"}`
+          : "w-80 border-r border-[#252d3a] flex flex-col"}
+          style={{ background: PANEL, width: isMobile ? "85vw" : 320, maxWidth: isMobile ? 360 : "none", overflowY: isMobile ? "auto" : "visible" }}>
+          {isMobile && (
+            <div className="px-3 py-2 border-b border-[#252d3a] flex items-center justify-between" style={{ background: PANEL_2 }}>
+              <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-400">Menu</span>
+              <button onClick={() => setDrawerOpen(false)} className="p-2 -mr-2 text-gray-400 active:text-yellow-400">
+                <X size={18} />
+              </button>
+            </div>
+          )}
+          <div className="p-3 border-b border-[#252d3a]">
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 flex items-center gap-1.5">
+                <UserCog size={11} /> Team Roster
+              </div>
+              <Btn small onClick={addRider}><Plus size={10} className="inline" /> Rider</Btn>
+            </div>
+            {riders.length === 0 ? (
+              <div className="text-[10px] font-mono text-gray-600 py-2">ライダーを追加してください</div>
+            ) : (
+              <div className="space-y-1.5">
+                {riders.map((r) => (
+                  <div key={r.id} className="flex items-center gap-2 group">
+                    <input type="color" value={r.color} onChange={(e) => updateRider(r.id, "color", e.target.value)}
+                      className="cursor-pointer bg-transparent border-0 p-0" style={{ borderRadius: 2, width: isMobile ? 32 : 20, height: isMobile ? 32 : 20 }} />
+                    <input value={r.name} onChange={(e) => updateRider(r.id, "name", e.target.value)}
+                      className="flex-1 bg-[#0a0e14] border border-[#252d3a] font-mono text-gray-200 focus:border-yellow-400 outline-none"
+                      style={{ borderRadius: 2, padding: isMobile ? "8px 10px" : "2px 8px", fontSize: isMobile ? 16 : 12 }} placeholder="ライダー名" />
+                    <button onClick={() => removeRider(r.id)} className={`text-gray-500 active:text-red-400 hover:text-red-400 transition ${isMobile ? "p-2" : "opacity-0 group-hover:opacity-100"}`}>
+                      <Trash2 size={isMobile ? 14 : 11} />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          <div className="p-3 border-b border-[#252d3a]">
+            <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">Sessions</div>
+            {sessions.length === 0 && (
+              <div className="border-2 border-dashed border-[#252d3a] py-8 text-center text-gray-500 text-xs font-mono cursor-pointer hover:border-yellow-400 hover:text-yellow-400 transition"
+                onClick={() => fileInputRef.current?.click()}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => { e.preventDefault(); handleFiles(e.dataTransfer.files); }}>
+                DROP CSV<br />FILES HERE
+              </div>
+            )}
+            <div className="space-y-1">
+              {sessions.map((s) => (
+                <div key={s.id}
+                  onClick={() => { setActiveSessionId(s.id); setSelectedLap(null); setCompareLap(null); if (isMobile) setDrawerOpen(false); }}
+                  className={`px-2 py-1.5 cursor-pointer border-l-2 group flex items-center justify-between ${activeSessionId === s.id ? "border-yellow-400 bg-[#1a212c]" : "border-transparent hover:bg-[#1a212c]"}`}>
+                  <div className="min-w-0 flex-1">
+                    <div className="font-mono text-xs text-gray-200 truncate">{s.name}</div>
+                    <div className="font-mono text-[9px] text-gray-500 mt-0.5 flex items-center gap-2">
+                      <span className={`px-1 ${s.type === "race" ? "bg-red-900/50 text-red-300" : s.type === "qualifying" ? "bg-blue-900/50 text-blue-300" : "bg-gray-700/50 text-gray-300"}`}>
+                        {s.type.toUpperCase()}
+                      </span>
+                      {s.laps.length} laps · {s.stints.length} stints · {(s.duration / 60).toFixed(0)}m
+                    </div>
+                  </div>
+                  <button onClick={(e) => { e.stopPropagation(); removeSession(s.id); }} className="opacity-0 group-hover:opacity-100 text-gray-500 hover:text-red-400">
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {activeSession && (
+            <div className="p-3 flex-1 overflow-y-auto">
+              <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2 flex items-center gap-1.5">
+                <Users size={11} /> Stint Assignment
+                <span className="text-gray-700 normal-case tracking-normal">— {activeSession.stints.length} detected</span>
+              </div>
+              {activeSession.stints.length === 0 ? (
+                <div className="text-[10px] font-mono text-gray-600 py-2">スティントが検出されませんでした</div>
+              ) : (
+                <div className="space-y-1.5">
+                  {activeSession.stints.map((st, i) => {
+                    const riderId = activeStintMap[st.id];
+                    const rider = riders.find((r) => r.id === riderId);
+                    return (
+                      <div key={st.id} className="border border-[#252d3a] p-2 flex items-center gap-2"
+                        style={{ background: PANEL_2, borderRadius: 2, borderLeftColor: rider ? rider.color : STROKE, borderLeftWidth: 2 }}>
+                        <div className="flex-1 min-w-0">
+                          <div className="font-mono text-[11px] text-gray-200">
+                            <span className="text-gray-500">STINT {i + 1}</span>
+                            <span className="ml-1.5">L{st.startLap}–L{st.endLap}</span>
+                          </div>
+                          <div className="font-mono text-[9px] text-gray-500 mt-0.5">
+                            {st.laps.length} laps · {(st.laps.reduce((a, l) => a + l.duration, 0) / 60).toFixed(1)}m
+                          </div>
+                        </div>
+                        <RiderSelect value={riderId} onChange={(rid) => assignStintToRider(activeSession.id, st.id, rid)}
+                          riders={riders} placeholder="未割当" small />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {/* Main */}
+        <div className="flex-1 flex flex-col">
+          {!activeSession ? (
+            <div className="flex-1 flex items-center justify-center text-gray-500">
+              <div className="text-center">
+                <Activity size={48} className="mx-auto mb-3 text-gray-700" />
+                <div className="font-mono text-sm tracking-wider uppercase">No Session Loaded</div>
+                <div className="font-mono text-xs text-gray-600 mt-1">Drop a Drogger CSV to begin</div>
+              </div>
+            </div>
+          ) : (
+            <>
+              {/* Session header with engine type selector */}
+              <div className="border-b border-[#252d3a] flex items-center justify-between gap-2" style={{ background: PANEL, padding: isMobile ? "6px 12px" : "8px 16px" }}>
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <div className="w-1 h-5 flex-shrink-0" style={{ background: ACCENT }}></div>
+                  <div className="font-mono text-xs text-gray-200 truncate" style={{ maxWidth: isMobile ? "calc(100vw - 240px)" : "28rem" }}>{activeSession.name}</div>
+                  {(() => {
+                    // Source badge: DRG / SP / ECU / LM
+                    const srcMap = {
+                      drogger:    { label: "DRG", color: "bg-yellow-700/40 text-yellow-300" },
+                      aracer_sp:  { label: "aR-SP", color: "bg-purple-900/50 text-purple-300" },
+                      aracer_ecu: { label: "aR-ECU", color: "bg-purple-900/50 text-purple-300" },
+                      aracer_lm:  { label: "aR-LM", color: "bg-fuchsia-900/50 text-fuchsia-300" },
+                    };
+                    const s = srcMap[activeSession.source] || srcMap.drogger;
+                    return (
+                      <span className={`font-mono text-[9px] px-1.5 py-0.5 flex-shrink-0 ${s.color}`} style={{ borderRadius: 2 }}>
+                        {s.label}
+                      </span>
+                    );
+                  })()}
+                  {!isMobile && (
+                    <span className={`font-mono text-[9px] px-1.5 py-0.5 ${activeSession.type === "race" ? "bg-red-900/50 text-red-300" : activeSession.type === "qualifying" ? "bg-blue-900/50 text-blue-300" : "bg-gray-700/50 text-gray-300"}`}>
+                      {activeSession.type.toUpperCase()}
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-2 flex-shrink-0">
+                  {!isMobile && <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-gray-500">Engine</span>}
+                  <div className="flex border border-[#252d3a]" style={{ borderRadius: 2 }}>
+                    {["2st", "4st"].map((t) => {
+                      const active = activeSession.engineType === t;
+                      return (
+                        <button key={t} onClick={() => setSessionEngineType(activeSession.id, t)}
+                          className={`font-mono uppercase tracking-wider transition ${active ? "bg-yellow-400 text-black" : "bg-transparent text-gray-300 hover:text-yellow-400"}`}
+                          style={{ padding: isMobile ? "6px 10px" : "4px 12px", fontSize: 10 }}>
+                          {t}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              <div className="border-b border-[#252d3a] flex items-stretch overflow-x-auto" style={{ background: PANEL, paddingLeft: isMobile ? 4 : 12, paddingRight: isMobile ? 4 : 12 }}>
+                {[
+                  { id: "overview", label: "Overview", Icon: Activity },
+                  ...(activeSession.hasGps ? [
+                    { id: "track", label: "Track", Icon: MapPin },
+                    { id: "compare", label: "Compare", Icon: Layers },
+                  ] : []),
+                  { id: "riders", label: "Riders", Icon: Users },
+                  { id: "strategy", label: "Strategy", Icon: Gauge },
+                  ...(activeSession.hasAfr ? [{ id: "tuning", label: "Tuning", Icon: Gauge }] : []),
+                ].map(({ id, label, Icon }) => {
+                  const active = activeTab === id;
+                  return (
+                    <button key={id} onClick={() => { setActiveTab(id); if (isMobile) setDrawerOpen(false); }}
+                      className={`font-mono uppercase tracking-wider flex items-center gap-1.5 border-b-2 transition flex-shrink-0 ${active ? "border-yellow-400 text-yellow-400" : "border-transparent text-gray-400 hover:text-gray-200"}`}
+                      style={{ padding: isMobile ? "12px 14px" : "10px 16px", fontSize: isMobile ? 11 : 12, touchAction: "manipulation" }}>
+                      <Icon size={isMobile ? 14 : 12} />{label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className={`flex-1 overflow-y-auto space-y-3 ${isMobile ? "p-2" : "p-4 space-y-4"}`}>
+                {activeTab === "overview" && (<>
+                  <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-6"}`}>
+                    {(() => {
+                      const racing = activeSession.laps.filter((l) => l.isRacing);
+                      const best = racing.length ? Math.min(...racing.map((l) => l.duration)) : null;
+                      const avg = racing.length ? racing.reduce((a, l) => a + l.duration, 0) / racing.length : null;
+                      const maxRpm = Math.max(...activeSession.laps.map((l) => l.maxRpm));
+                      const maxSpd = Math.max(...activeSession.laps.map((l) => l.maxSpeed));
+                      return (<>
+                        <Panel className="p-3"><Stat label="Total Time" value={(activeSession.duration / 60).toFixed(1)} unit="min" /></Panel>
+                        <Panel className="p-3"><Stat label="Racing Laps" value={racing.length} unit="" /></Panel>
+                        <Panel className="p-3"><Stat label="Best Lap" value={best ? fmtTime(best) : "—"} unit="" /></Panel>
+                        <Panel className="p-3"><Stat label="Avg Lap" value={avg ? fmtTime(avg) : "—"} unit="" /></Panel>
+                        <Panel className="p-3"><Stat label="Max RPM" value={maxRpm.toFixed(0)} unit="rpm" /></Panel>
+                        <Panel className="p-3"><Stat label="Top Speed" value={fmtNum(maxSpd, 1)} unit="km/h" /></Panel>
+                      </>);
+                    })()}
+                  </div>
+                  <Panel title="Lap Times — colored by assigned rider, click to inspect" accent>
+                    <div className="p-2"><LapTimesChart session={activeSession} lookupRiderForLap={lookupRiderForLap} onLapClick={(l) => setSelectedLap(l)} selectedLap={selectedLap} /></div>
+                  </Panel>
+                  <Panel title="Pace Evolution (3-lap rolling avg)" accent>
+                    <div className="p-2"><PaceEvolution session={activeSession} /></div>
+                  </Panel>
+                </>)}
+
+                {activeTab === "track" && (<>
+                  <Panel title="Lap Selection" accent
+                    actions={
+                      <div className="flex items-center" style={{ border: `1px solid ${STROKE}`, borderRadius: 2 }}>
+                        {[
+                          { id: "chips",  label: "Chips" },
+                          { id: "table",  label: "Table" },
+                        ].map((v) => (
+                          <button key={v.id} onClick={() => setLapView(v.id)}
+                            className="font-mono uppercase tracking-wider transition"
+                            style={{
+                              background: lapView === v.id ? ACCENT : "transparent",
+                              color: lapView === v.id ? "#000" : FG_DIM,
+                              padding: "3px 8px",
+                              fontSize: 9,
+                            }}>
+                            {v.label}
+                          </button>
+                        ))}
+                      </div>
+                    }>
+                    {lapView === "chips" ? (
+                      <div className={`p-3 flex flex-wrap gap-1.5 overflow-y-auto ${isMobile ? "max-h-40" : "max-h-32"}`}>
+                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
+                          const r = lookupRiderForLap(l.lap);
+                          return (
+                            <button key={l.lap} onClick={() => setSelectedLap(l.lap)}
+                              className={`font-mono border flex items-center gap-1.5 ${selectedLap === l.lap ? "border-yellow-400 bg-yellow-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-yellow-400"}`}
+                              style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
+                              {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <LapTable
+                        laps={activeSession.laps.filter((l) => l.isRacing)}
+                        selectedLap={selectedLap}
+                        onSelectLap={setSelectedLap}
+                        hasAfr={activeSession.hasAfr}
+                        hasThrottle={activeSession.hasThrottle}
+                        lookupRiderForLap={lookupRiderForLap}
+                        isMobile={isMobile}
+                      />
+                    )}
+                  </Panel>
+                  {selectedLapObj ? (<>
+                    {/* Playback controls + telemetry readout */}
+                    <Panel title="Playback — animate from start to finish" accent>
+                      <div className={`border-b border-[#252d3a] flex items-center gap-2 ${isMobile ? "flex-wrap p-2" : "px-3 py-2 gap-3"}`} style={{ background: PANEL_2 }}>
+                        <button onClick={togglePlay} className="bg-yellow-400 active:bg-yellow-300 hover:bg-yellow-300 text-black border-0 transition flex items-center justify-center" style={{ borderRadius: 2, width: isMobile ? 48 : 40, height: isMobile ? 40 : 32, touchAction: "manipulation" }} title={isPlaying ? "Pause" : "Play"}>
+                          {isPlaying ? <Pause size={isMobile ? 18 : 14} /> : <Play size={isMobile ? 18 : 14} />}
+                        </button>
+                        <button onClick={resetPlay} className="bg-transparent border border-[#252d3a] text-gray-300 active:text-yellow-400 hover:border-yellow-400 hover:text-yellow-400 transition flex items-center justify-center" style={{ borderRadius: 2, width: isMobile ? 40 : 32, height: isMobile ? 40 : 32, touchAction: "manipulation" }} title="Reset">
+                          <RotateCcw size={isMobile ? 16 : 12} />
+                        </button>
+                        <div className="font-mono text-xs text-gray-200 tabular-nums" style={{ minWidth: 110 }}>
+                          {fmtTime(elapsedSec)} <span className="text-gray-600">/ {fmtTime(selectedLapObj.duration)}</span>
+                        </div>
+                        <input type="range" min={0} max={1000} step={1} value={Math.round(playbackProgress * 1000)}
+                          onChange={(e) => { setPlaybackProgress(parseInt(e.target.value, 10) / 1000); setIsPlaying(false); }}
+                          className={isMobile ? "w-full cursor-pointer" : "flex-1 cursor-pointer"} style={{ accentColor: ACCENT, height: isMobile ? 32 : "auto", touchAction: "manipulation" }} />
+                        <select value={playbackSpeed} onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                          className="bg-[#0a0e14] border border-[#252d3a] text-gray-200 font-mono cursor-pointer hover:border-yellow-400 outline-none" style={{ borderRadius: 2, padding: isMobile ? "6px 8px" : "4px 8px", fontSize: isMobile ? 12 : 10, height: isMobile ? 40 : "auto" }}>
+                          {[0.25, 0.5, 1, 2, 4].map((v) => (<option key={v} value={v}>{v}×</option>))}
+                        </select>
+                      </div>
+                      <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: `3px solid ${ACCENT}` }}>
+                            <Stat label="Time" value={fmtTime(elapsedSec)} />
+                        <Stat label="Speed" value={fmtNum(refCursor?.Speed ?? 0, 1)} unit="km/h" />
+                        <Stat label="RPM" value={(refCursor?.Rpm ?? 0).toFixed(0)} unit="rpm" />
+                        {activeSession.hasAfr && (
+                          <Stat label="A/F" value={fmtNum(refCursor?.Afr ?? 0, 2)} />
+                        )}
+                      </div>
+                    </Panel>
+
+                    <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
+                      <Panel title={`Track — Lap ${selectedLapObj.lap} (speed)`} accent>
+                        {activeSession.lapRef && (
+                          <div className="px-3 py-1.5 border-b border-[#252d3a] flex items-center justify-between gap-2" style={{ background: "#0d121a" }}>
+                            <div className="font-mono text-[10px] uppercase tracking-wider text-gray-500 min-w-0 flex-1">
+                              S/F:
+                              <span className="ml-2 text-gray-300">
+                                {activeSession.lapRef.Latitude.toFixed(5)}, {activeSession.lapRef.Longitude.toFixed(5)}
+                              </span>
+                            </div>
+                            <button onClick={() => setLapLineEditMode((m) => !m)}
+                              className={`font-mono uppercase tracking-wider transition px-2 py-1 flex-shrink-0 ${lapLineEditMode ? "bg-yellow-400 text-black" : "bg-transparent border border-[#252d3a] text-gray-300 hover:border-yellow-400 hover:text-yellow-400"}`}
+                              style={{ borderRadius: 2, fontSize: 10 }}
+                              title="クリックでスタートフィニッシュラインを手動設定">
+                              {lapLineEditMode ? "× 設定中…" : "✎ S/Fを動かす"}
+                            </button>
+                          </div>
+                        )}
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="speed" cursorSample={refCursor} lapRef={activeSession.lapRef} lapLineEditMode={lapLineEditMode} onSetLapLine={handleSetLapLine} height={isMobile ? 320 : 380} />
+                      </Panel>
+                      <Panel title={`Track — Lap ${selectedLapObj.lap} (rpm)`} accent>
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="rpm" engineType={activeSession.engineType} cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
+                      </Panel>
+                    </div>
+                    {activeSession.hasAfr && (
+                      <Panel title={`Track — Lap ${selectedLapObj.lap} (A/F)`} accent>
+                        <TrackPlot lap={selectedLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0} colorBy="afr" engineType={activeSession.engineType} cursorSample={refCursor} lapRef={activeSession.lapRef} height={isMobile ? 320 : 380} />
+                      </Panel>
+                    )}
+                    {/* Unified telemetry trace */}
+                    <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
+                      <div className="p-2">
+                        <MultiTracePlot lapA={selectedLapObj}
+                          cursorSampleA={refCursor}
+                          hasAfr={activeSession.hasAfr} isMobile={isMobile}
+                          height={isMobile ? 300 : 340} />
+                      </div>
+                    </Panel>
+                    <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-5"}`}>
+                      <Panel className="p-3">
+                        <div className="text-[9px] uppercase tracking-[0.15em] font-mono text-gray-500 mb-0.5">Rider</div>
+                        <div className="font-mono text-gray-100 flex items-center gap-2">
+                          {(() => {
+                            const r = lookupRiderForLap(selectedLapObj.lap);
+                            return r ? (<><span className="w-3 h-3" style={{ background: r.color }}></span><span className="text-base">{r.name}</span></>)
+                                     : (<span className="text-gray-600 text-base">未割当</span>);
+                          })()}
+                        </div>
+                      </Panel>
+                      <Panel className="p-3"><Stat label="Lap Time" value={fmtTime(selectedLapObj.duration)} /></Panel>
+                      <Panel className="p-3"><Stat label="Max RPM" value={selectedLapObj.maxRpm.toFixed(0)} unit="rpm" /></Panel>
+                      <Panel className="p-3"><Stat label="Max Speed" value={fmtNum(selectedLapObj.maxSpeed, 1)} unit="km/h" /></Panel>
+                      <Panel className="p-3"><Stat label="Avg Speed" value={fmtNum(selectedLapObj.avgSpeed, 1)} unit="km/h" /></Panel>
+                    </div>
+                  </>) : (<Panel className="p-8 text-center text-gray-500 font-mono text-xs">SELECT A LAP ABOVE</Panel>)}
+                </>)}
+
+                {activeTab === "compare" && (<>
+                  <div className={`grid gap-3 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
+                    <Panel title="Reference Lap (yellow)" accent>
+                      <div className="p-3 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
+                          const r = lookupRiderForLap(l.lap);
+                          return (
+                            <button key={l.lap} onClick={() => setSelectedLap(l.lap)}
+                              className={`font-mono border flex items-center gap-1.5 ${selectedLap === l.lap ? "border-yellow-400 bg-yellow-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-yellow-400"}`}
+                              style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
+                              {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </Panel>
+                    <Panel title="Compare Lap (cyan)" accent>
+                      <div className="p-3 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
+                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
+                          const r = lookupRiderForLap(l.lap);
+                          return (
+                            <button key={l.lap} onClick={() => setCompareLap(l.lap)}
+                              className={`font-mono border flex items-center gap-1.5 ${compareLap === l.lap ? "border-cyan-400 bg-cyan-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-cyan-400"}`}
+                              style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
+                              {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </Panel>
+                  </div>
+                  {selectedLapObj && (<>
+                    {/* Playback controls + dual telemetry readout */}
+                    <Panel title="Playback — both laps animate in real time" accent>
+                      <div className={`border-b border-[#252d3a] flex items-center gap-2 ${isMobile ? "flex-wrap p-2" : "px-3 py-2 gap-3"}`} style={{ background: PANEL_2 }}>
+                        <button onClick={togglePlay} className="bg-yellow-400 active:bg-yellow-300 hover:bg-yellow-300 text-black border-0 transition flex items-center justify-center" style={{ borderRadius: 2, width: isMobile ? 48 : 40, height: isMobile ? 40 : 32, touchAction: "manipulation" }} title={isPlaying ? "Pause" : "Play"}>
+                          {isPlaying ? <Pause size={isMobile ? 18 : 14} /> : <Play size={isMobile ? 18 : 14} />}
+                        </button>
+                        <button onClick={resetPlay} className="bg-transparent border border-[#252d3a] text-gray-300 active:text-yellow-400 hover:border-yellow-400 hover:text-yellow-400 transition flex items-center justify-center" style={{ borderRadius: 2, width: isMobile ? 40 : 32, height: isMobile ? 40 : 32, touchAction: "manipulation" }} title="Reset">
+                          <RotateCcw size={isMobile ? 16 : 12} />
+                        </button>
+                        <div className="font-mono text-xs text-gray-200 tabular-nums" style={{ minWidth: 110 }}>
+                          {fmtTime(elapsedSec)} <span className="text-gray-600">/ {fmtTime(playbackDuration)}</span>
+                        </div>
+                        <input type="range" min={0} max={1000} step={1} value={Math.round(playbackProgress * 1000)}
+                          onChange={(e) => { setPlaybackProgress(parseInt(e.target.value, 10) / 1000); setIsPlaying(false); }}
+                          className={isMobile ? "w-full cursor-pointer" : "flex-1 cursor-pointer"} style={{ accentColor: ACCENT, height: isMobile ? 32 : "auto", touchAction: "manipulation" }} />
+                        <select value={playbackSpeed} onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                          className="bg-[#0a0e14] border border-[#252d3a] text-gray-200 font-mono cursor-pointer hover:border-yellow-400 outline-none" style={{ borderRadius: 2, padding: isMobile ? "6px 8px" : "4px 8px", fontSize: isMobile ? 12 : 10, height: isMobile ? 40 : "auto" }}>
+                          {[0.25, 0.5, 1, 2, 4].map((v) => (<option key={v} value={v}>{v}×</option>))}
+                        </select>
+                      </div>
+                      <div className={`grid gap-0 ${isMobile ? "grid-cols-1" : "grid-cols-2"}`}>
+                        <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: `3px solid ${ACCENT}` }}>
+                              <Stat label={`Lap ${selectedLapObj.lap} · time`} value={fmtTime(refElapsedDisplay)} />
+                          <Stat label="Speed" value={fmtNum(refCursor?.Speed ?? 0, 1)} unit="km/h" />
+                          <Stat label="RPM" value={(refCursor?.Rpm ?? 0).toFixed(0)} />
+                          {activeSession.hasAfr && (
+                            <Stat label="A/F" value={fmtNum(refCursor?.Afr ?? 0, 2)} />
+                          )}
+                        </div>
+                        {compareLapObj ? (
+                          <div className={`grid gap-3 p-3 ${activeSession.hasAfr ? "grid-cols-4" : "grid-cols-3"}`} style={{ borderLeft: "3px solid #22d3ee" }}>
+                            <Stat label={`Lap ${compareLapObj.lap} · time`} value={fmtTime(cmpElapsedDisplay)} />
+                            <Stat label="Speed" value={fmtNum(cmpCursor?.Speed ?? 0, 1)} unit="km/h" />
+                            <Stat label="RPM" value={(cmpCursor?.Rpm ?? 0).toFixed(0)} />
+                            {activeSession.hasAfr && (
+                              <Stat label="A/F" value={fmtNum(cmpCursor?.Afr ?? 0, 2)} />
+                            )}
+                          </div>
+                        ) : (
+                          <div className="p-3 text-gray-600 font-mono text-xs flex items-center" style={{ borderLeft: "3px solid #22d3ee" }}>
+                            Compare lap not selected
+                          </div>
+                        )}
+                      </div>
+                    </Panel>
+
+                    <Panel title="Track Overlay" accent>
+                      <TrackPlot lap={selectedLapObj} overlay={compareLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0}
+                        cursorSample={refCursor} overlayCursorSample={cmpCursor} lapRef={activeSession.lapRef} height={isMobile ? 360 : 380} />
+                    </Panel>
+                    <Panel title="Telemetry — Speed / RPM / A/F vs distance" accent>
+                      <div className="p-2">
+                        <MultiTracePlot lapA={selectedLapObj} lapB={compareLapObj}
+                          cursorSampleA={refCursor} cursorSampleB={cmpCursor}
+                          hasAfr={activeSession.hasAfr} isMobile={isMobile}
+                          height={isMobile ? 320 : 360} />
+                      </div>
+                    </Panel>
+                    {compareLapObj && (
+                      <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-4"}`}>
+                        <Panel className="p-3"><Stat label="Δ Lap Time" value={(selectedLapObj.duration - compareLapObj.duration).toFixed(3)} unit="s" /></Panel>
+                        <Panel className="p-3"><Stat label="Δ Max RPM" value={(selectedLapObj.maxRpm - compareLapObj.maxRpm).toFixed(0)} /></Panel>
+                        <Panel className="p-3"><Stat label="Δ Max Speed" value={fmtNum(selectedLapObj.maxSpeed - compareLapObj.maxSpeed, 1)} unit="km/h" /></Panel>
+                        <Panel className="p-3"><Stat label="Δ Avg Speed" value={fmtNum(selectedLapObj.avgSpeed - compareLapObj.avgSpeed, 1)} unit="km/h" /></Panel>
+                      </div>
+                    )}
+                  </>)}
+                </>)}
+
+                {activeTab === "riders" && (
+                  <Panel title="Per-Rider Statistics — aggregated across assigned stints" accent>
+                    {riderStats.length === 0 ? (
+                      <div className="p-8 text-center text-gray-500 font-mono text-xs">ライダーをロスターに追加してください</div>
+                    ) : (
+                      <table className="w-full font-mono text-xs">
+                        <thead>
+                          <tr className="border-b border-[#252d3a]">
+                            {["Rider", "Stints", "Laps", "Best", "Avg", "Worst", "Spread", "MaxRpm", "TopSpd"].map((h) => (
+                              <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-gray-500">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {riderStats.map((r) => (
+                            <tr key={r.id} className="border-b border-[#1a212c] hover:bg-[#1a212c]">
+                              <td className="px-3 py-2">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-2 h-2" style={{ background: r.color }}></div>
+                                  <span className="text-gray-200">{r.name}</span>
+                                </div>
+                              </td>
+                              <td className="px-3 py-2 text-gray-400">{r.stintCount || 0}</td>
+                              <td className="px-3 py-2 text-gray-300">{r.lapCount || 0}</td>
+                              <td className="px-3 py-2 text-yellow-400">{r.bestLap ? fmtTime(r.bestLap) : "—"}</td>
+                              <td className="px-3 py-2 text-gray-300">{r.avgLap ? fmtTime(r.avgLap) : "—"}</td>
+                              <td className="px-3 py-2 text-gray-500">{r.worstLap ? fmtTime(r.worstLap) : "—"}</td>
+                              <td className="px-3 py-2 text-gray-400">{r.consistency != null ? `+${r.consistency.toFixed(2)}s` : "—"}</td>
+                              <td className="px-3 py-2 text-gray-300">{r.maxRpm || "—"}</td>
+                              <td className="px-3 py-2 text-gray-300">{r.maxSpeed ? fmtNum(r.maxSpeed, 1) : "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    )}
+                  </Panel>
+                )}
+
+                {activeTab === "strategy" && (<>
+                  <div className="grid grid-cols-3 gap-3">
+                    <Panel className="p-3 col-span-1">
+                      <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">Theoretical Best</div>
+                      {theoreticalBest ? (<>
+                        <div className="font-mono text-2xl text-yellow-400 mb-2">{fmtTime(theoreticalBest.total)}</div>
+                        <div className="font-mono text-[10px] text-gray-500 mb-3">From {theoreticalBest.N} sector best segments (placeholder)</div>
+                        <div className="space-y-1">
+                          {theoreticalBest.sectors.map((s, i) => (
+                            <div key={i} className="flex justify-between font-mono text-[10px]">
+                              <span className="text-gray-500">SEC {i + 1}</span>
+                              <span className="text-gray-200">{s.toFixed(3)}s</span>
+                            </div>
+                          ))}
+                        </div>
+                      </>) : (<div className="text-gray-500 text-xs font-mono">Need ≥2 laps</div>)}
+                    </Panel>
+                    <Panel className="p-3 col-span-2">
+                      <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">Stints — assign rider here too</div>
+                      <div className="space-y-2">
+                        {activeSession.stints.map((st, i) => {
+                          const riderId = activeStintMap[st.id];
+                          const r = riders.find((rr) => rr.id === riderId);
+                          const dur = st.laps.reduce((a, l) => a + l.duration, 0);
+                          const best = Math.min(...st.laps.map((l) => l.duration));
+                          const avg = dur / st.laps.length;
+                          return (
+                            <div key={st.id} className="border border-[#252d3a] p-2 flex items-center justify-between font-mono text-xs"
+                              style={{ background: PANEL_2, borderLeftColor: r ? r.color : STROKE, borderLeftWidth: 2 }}>
+                              <div className="flex items-center gap-3 flex-1">
+                                <div>
+                                  <div className="text-gray-200">STINT {i + 1}: L{st.startLap}–L{st.endLap}</div>
+                                  <div className="flex gap-3 text-[10px] mt-0.5">
+                                    <span className="text-gray-500">{st.laps.length} laps</span>
+                                    <span className="text-gray-500">{(dur / 60).toFixed(1)}m</span>
+                                    <span><span className="text-gray-500">best </span><span className="text-yellow-400">{fmtTime(best)}</span></span>
+                                    <span><span className="text-gray-500">avg </span><span className="text-gray-200">{fmtTime(avg)}</span></span>
+                                  </div>
+                                </div>
+                              </div>
+                              <RiderSelect value={riderId} onChange={(rid) => assignStintToRider(activeSession.id, st.id, rid)} riders={riders} placeholder="未割当" />
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </Panel>
+                  </div>
+                  <Panel title="Lap-by-lap detail" accent>
+                    <div className="max-h-96 overflow-y-auto">
+                      <table className="w-full font-mono text-xs">
+                        <thead className="sticky top-0" style={{ background: PANEL }}>
+                          <tr className="border-b border-[#252d3a]">
+                            {["Lap", "Time", "Δ Best", "MaxRPM", "MaxSpd", "AvgSpd", "Rider"].map((h) => (
+                              <th key={h} className="px-3 py-2 text-left text-[10px] uppercase tracking-wider text-gray-500">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(() => {
+                            const racing = activeSession.laps.filter((l) => l.isRacing);
+                            const best = racing.length ? Math.min(...racing.map((l) => l.duration)) : 0;
+                            return racing.map((lap) => {
+                              const r = lookupRiderForLap(lap.lap);
+                              const isBest = lap.duration === best;
+                              return (
+                                <tr key={lap.lap} className={`border-b border-[#1a212c] hover:bg-[#1a212c] ${isBest ? "bg-yellow-400/5" : ""}`}>
+                                  <td className="px-3 py-1.5 text-gray-200">L{lap.lap}</td>
+                                  <td className={`px-3 py-1.5 ${isBest ? "text-yellow-400" : "text-gray-200"}`}>{fmtTime(lap.duration)}</td>
+                                  <td className="px-3 py-1.5 text-gray-400">+{(lap.duration - best).toFixed(3)}</td>
+                                  <td className="px-3 py-1.5 text-gray-300">{lap.maxRpm}</td>
+                                  <td className="px-3 py-1.5 text-gray-300">{fmtNum(lap.maxSpeed, 1)}</td>
+                                  <td className="px-3 py-1.5 text-gray-300">{fmtNum(lap.avgSpeed, 1)}</td>
+                                  <td className="px-3 py-1.5">
+                                    {r ? (
+                                      <span className="flex items-center gap-1.5">
+                                        <div className="w-2 h-2" style={{ background: r.color }}></div>
+                                        <span className="text-gray-300">{r.name}</span>
+                                      </span>
+                                    ) : (<span className="text-gray-600">—</span>)}
+                                  </td>
+                                </tr>
+                              );
+                            });
+                          })()}
+                        </tbody>
+                      </table>
+                    </div>
+                  </Panel>
+                </>)}
+
+                {activeTab === "tuning" && activeSession.hasAfr && (() => {
+                  const allSamples = activeSession.laps.flatMap((l) => l.samples)
+                    .filter((s) => s.Rpm > 1000 && s.Afr >= AFR_MIN && s.Afr <= AFR_MAX);
+                  if (!allSamples.length) {
+                    return (<Panel className="p-8 text-center text-gray-500 font-mono text-xs">A/Fデータが解析できません</Panel>);
+                  }
+                  const target = AFR_TARGETS[activeSession.engineType] || AFR_TARGETS["4st"];
+
+                  const nBins = 24;
+                  const binSize = (AFR_MAX - AFR_MIN) / nBins;
+                  const bins = new Array(nBins).fill(0);
+                  allSamples.forEach((s) => {
+                    const b = Math.min(nBins - 1, Math.max(0, Math.floor((s.Afr - AFR_MIN) / binSize)));
+                    bins[b]++;
+                  });
+                  const binMax = Math.max(...bins);
+                  const totalSamples = allSamples.length;
+
+                  const lapWOT = activeSession.laps
+                    .filter((l) => l.isRacing)
+                    .map((l) => {
+                      const wot = l.samples.filter((s) => s.ThrottolePos > 60 && s.Afr >= AFR_MIN);
+                      const avg = wot.length ? wot.reduce((a, s) => a + s.Afr, 0) / wot.length : null;
+                      return { lap: l.lap, avg, count: wot.length };
+                    })
+                    .filter((d) => d.avg != null);
+
+                  const stride = Math.max(1, Math.floor(allSamples.length / 2000));
+                  const scatter = allSamples.filter((_, i) => i % stride === 0);
+
+                  const sortedAfr = allSamples.map((s) => s.Afr).sort((a, b) => a - b);
+                  const median = sortedAfr[Math.floor(sortedAfr.length / 2)];
+                  const inTarget = allSamples.filter((s) => s.Afr >= target.low && s.Afr <= target.high).length;
+                  const tooLean = allSamples.filter((s) => s.Afr > target.high).length;
+                  const tooRich = allSamples.filter((s) => s.Afr < target.low).length;
+
+                  return (<>
+                    <Panel className="p-3">
+                      <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">
+                        A/F Summary — engine: {activeSession.engineType.toUpperCase()} · target {target.low}–{target.high}
+                      </div>
+                      <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-5"}`}>
+                        <Stat label="Samples" value={totalSamples.toLocaleString()} />
+                        <Stat label="Median A/F" value={median.toFixed(2)} />
+                        <Stat label="In Target" value={`${(100 * inTarget / totalSamples).toFixed(1)}%`} />
+                        <Stat label="Rich" value={`${(100 * tooRich / totalSamples).toFixed(1)}%`} />
+                        <Stat label="Lean" value={`${(100 * tooLean / totalSamples).toFixed(1)}%`} />
+                      </div>
+                    </Panel>
+
+                    <Panel title="A/F Histogram (full session)" accent>
+                      <svg viewBox="0 0 800 240" className="w-full" style={{ background: BG }}>
+                        {[0.25, 0.5, 0.75, 1].map((t, i) => (
+                          <line key={i} x1={50} y1={20 + (180 * (1 - t))} x2={780} y2={20 + (180 * (1 - t))} stroke={STROKE} strokeWidth={0.5} />
+                        ))}
+                        {bins.map((count, i) => {
+                          const afrLow = AFR_MIN + i * binSize;
+                          const afrCenter = afrLow + binSize / 2;
+                          const barH = (count / binMax) * 180;
+                          const xL = 50 + (i * (730 / nBins));
+                          const wd = 730 / nBins - 1;
+                          return (<rect key={i} x={xL} y={200 - barH} width={wd} height={barH} fill={afrColor(afrCenter, activeSession.engineType)} />);
+                        })}
+                        <rect x={50 + ((target.low - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 730}
+                              y={20}
+                              width={((target.high - target.low) / (AFR_MAX - AFR_MIN)) * 730}
+                              height={180}
+                              fill="none" stroke={ACCENT} strokeWidth={1} strokeDasharray="3 3" opacity={0.7} />
+                        {[8, 10, 12, 14, 14.7, 16, 18, 20].map((v, i) => {
+                          const x = 50 + ((v - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 730;
+                          return (
+                            <g key={i}>
+                              <line x1={x} y1={200} x2={x} y2={205} stroke={FG_MUTE} strokeWidth={0.5} />
+                              <text x={x} y={218} fill={FG_DIM} fontSize={10} fontFamily="monospace" textAnchor="middle">{v}</text>
+                            </g>
+                          );
+                        })}
+                        <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">samples ↑</text>
+                        <text x={780} y={234} textAnchor="end" fill={FG_DIM} fontSize={10} fontFamily="monospace">A/F →</text>
+                      </svg>
+                    </Panel>
+
+                    <Panel title="RPM × A/F — engine map check" accent>
+                      <svg viewBox="0 0 800 320" className="w-full" style={{ background: BG }}>
+                        {(() => {
+                          const rpmMax = Math.max(...scatter.map((s) => s.Rpm)) * 1.05;
+                          const sx = (r) => 50 + (r / rpmMax) * 730;
+                          const sy = (a) => 280 - ((a - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 260;
+                          return (<>
+                            <rect x={50} y={sy(target.high)} width={730} height={sy(target.low) - sy(target.high)}
+                              fill={ACCENT} opacity={0.08} />
+                            {[8, 10, 12, 13, 14, 14.7, 16, 18, 20].map((v, i) => (
+                              <g key={i}>
+                                <line x1={50} y1={sy(v)} x2={780} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+                                <text x={45} y={sy(v) + 3} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}</text>
+                              </g>
+                            ))}
+                            {[2000, 4000, 6000, 8000, 10000, 12000].filter((v) => v <= rpmMax).map((v, i) => (
+                              <g key={i}>
+                                <line x1={sx(v)} y1={20} x2={sx(v)} y2={280} stroke={STROKE} strokeWidth={0.3} />
+                                <text x={sx(v)} y={295} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v.toLocaleString()}</text>
+                              </g>
+                            ))}
+                            {scatter.map((s, i) => (
+                              <circle key={i} cx={sx(s.Rpm)} cy={sy(s.Afr)} r={1.4} fill={afrColor(s.Afr, activeSession.engineType)} opacity={0.65} />
+                            ))}
+                            <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">A/F ↑</text>
+                            <text x={780} y={313} textAnchor="end" fill={FG_DIM} fontSize={10} fontFamily="monospace">RPM →</text>
+                          </>);
+                        })()}
+                      </svg>
+                    </Panel>
+
+                    {activeSession.hasThrottle && (
+                      <Panel title="Throttle × A/F — load mapping" accent>
+                        <svg viewBox="0 0 800 320" className="w-full" style={{ background: BG }}>
+                          {(() => {
+                            const sx = (t) => 50 + (t / 100) * 730;
+                            const sy = (a) => 280 - ((a - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 260;
+                            const throttled = scatter.filter((s) => s.ThrottolePos > 0);
+                            return (<>
+                              <rect x={50} y={sy(target.high)} width={730} height={sy(target.low) - sy(target.high)}
+                                fill={ACCENT} opacity={0.08} />
+                              {[8, 10, 12, 13, 14, 14.7, 16, 18, 20].map((v, i) => (
+                                <g key={i}>
+                                  <line x1={50} y1={sy(v)} x2={780} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+                                  <text x={45} y={sy(v) + 3} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              {[0, 25, 50, 75, 100].map((v, i) => (
+                                <g key={i}>
+                                  <line x1={sx(v)} y1={20} x2={sx(v)} y2={280} stroke={STROKE} strokeWidth={0.3} />
+                                  <text x={sx(v)} y={295} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}%</text>
+                                </g>
+                              ))}
+                              {throttled.map((s, i) => (
+                                <circle key={i} cx={sx(s.ThrottolePos)} cy={sy(s.Afr)} r={1.4} fill={afrColor(s.Afr, activeSession.engineType)} opacity={0.65} />
+                              ))}
+                              <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">A/F ↑</text>
+                              <text x={780} y={313} textAnchor="end" fill={FG_DIM} fontSize={10} fontFamily="monospace">Throttle →</text>
+                            </>);
+                          })()}
+                        </svg>
+                      </Panel>
+                    )}
+
+                    {activeSession.hasThrottle && lapWOT.length > 0 && (
+                      <Panel title="Per-lap WOT (>60% throttle) average A/F — tuning consistency" accent>
+                        <svg viewBox="0 0 800 240" className="w-full" style={{ background: BG }}>
+                          {(() => {
+                            const sx = (i) => 50 + (i / Math.max(1, lapWOT.length - 1)) * 730;
+                            const sy = (a) => 200 - ((a - AFR_MIN) / (AFR_MAX - AFR_MIN)) * 180;
+                            return (<>
+                              <rect x={50} y={sy(target.high)} width={730} height={sy(target.low) - sy(target.high)}
+                                fill={ACCENT} opacity={0.1} />
+                              {[10, 12, 13, 14, 16].map((v, i) => (
+                                <g key={i}>
+                                  <line x1={50} y1={sy(v)} x2={780} y2={sy(v)} stroke={STROKE} strokeWidth={0.3} />
+                                  <text x={45} y={sy(v) + 3} textAnchor="end" fill={FG_DIM} fontSize={9} fontFamily="monospace">{v}</text>
+                                </g>
+                              ))}
+                              <path d={lapWOT.map((d, i) => `${i ? "L" : "M"}${sx(i)},${sy(d.avg)}`).join("")}
+                                fill="none" stroke={ACCENT} strokeWidth={1} opacity={0.5} />
+                              {lapWOT.map((d, i) => (
+                                <g key={i}>
+                                  <circle cx={sx(i)} cy={sy(d.avg)} r={4} fill={afrColor(d.avg, activeSession.engineType)} stroke={FG} strokeWidth={0.5} />
+                                  <text x={sx(i)} y={220} textAnchor="middle" fill={FG_DIM} fontSize={9} fontFamily="monospace">L{d.lap}</text>
+                                  <text x={sx(i)} y={sy(d.avg) - 8} textAnchor="middle" fill={FG} fontSize={9} fontFamily="monospace">{d.avg.toFixed(2)}</text>
+                                </g>
+                              ))}
+                              <text x={50} y={15} fill={FG_DIM} fontSize={10} fontFamily="monospace">avg A/F at WOT ↑</text>
+                            </>);
+                          })()}
+                        </svg>
+                      </Panel>
+                    )}
+                  </>);
+                })()}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* About modal */}
+      {aboutOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-70 p-4" onClick={() => setAboutOpen(false)}>
+          <div onClick={(e) => e.stopPropagation()} className="border border-[#252d3a] flex flex-col"
+            style={{ background: PANEL, borderRadius: 2, maxWidth: 520, width: "100%", maxHeight: "85vh" }}>
+            <div className="px-4 py-3 border-b border-[#252d3a] flex items-center justify-between flex-shrink-0">
+              <div className="flex items-center gap-2">
+                <div className="w-1 h-5" style={{ background: ACCENT }}></div>
+                <div>
+                  <div className="font-mono text-sm tracking-[0.2em] uppercase">Drogger // Telemetry</div>
+                  <div className="font-mono text-[9px] tracking-wider text-gray-500 uppercase">Endurance Analyzer · v{APP_VERSION}</div>
+                </div>
+              </div>
+              <button onClick={() => setAboutOpen(false)} className="p-2 -mr-2 text-gray-400 active:text-yellow-400 hover:text-yellow-400">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="overflow-y-auto p-4 space-y-4">
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1">About</div>
+                <p className="font-mono text-xs text-gray-300 leading-relaxed">
+                  Drogger（BizStation）GPSロガーのCSVデータを可視化・分析するツールです。
+                  ミニバイク・カート耐久レースでの活用を想定して作られました。
+                  ラップ解析、ライン比較、A/F燃調モニタリング、ライダー別集計などができます。
+                </p>
+              </section>
+
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1">プライバシー</div>
+                <p className="font-mono text-xs text-gray-300 leading-relaxed">
+                  読み込んだCSVデータはお使いのブラウザ内でのみ処理され、外部のサーバーには送信されません。
+                  ライダー名・スティント割当てなどもブラウザ内に留まり、ページを閉じると消えます。
+                </p>
+                <p className="font-mono text-xs text-gray-300 leading-relaxed mt-2">
+                  匿名のページビュー集計（Vercel Analytics）のみ利用しています。個人を特定できる情報は収集していません。
+                </p>
+              </section>
+
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-2">変更履歴</div>
+                <div className="space-y-3">
+                  {CHANGELOG.map((entry) => (
+                    <div key={entry.version} className="border-l-2 pl-3" style={{ borderColor: entry.version === APP_VERSION ? ACCENT : STROKE }}>
+                      <div className="font-mono text-xs flex items-baseline gap-2">
+                        <span className={entry.version === APP_VERSION ? "text-yellow-400" : "text-gray-200"}>v{entry.version}</span>
+                        <span className="text-gray-500 text-[10px]">{entry.date}</span>
+                      </div>
+                      <ul className="font-mono text-[11px] text-gray-400 mt-1 space-y-0.5">
+                        {entry.notes.map((n, i) => (
+                          <li key={i} className="flex gap-1.5"><span className="text-gray-600">·</span><span>{n}</span></li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1">ソース</div>
+                <a href="https://github.com/countZeroNine/drogger_analyzer" target="_blank" rel="noopener noreferrer"
+                  className="font-mono text-xs text-cyan-400 hover:text-yellow-400 inline-flex items-center gap-1.5">
+                  <Github size={11} /> github.com/countZeroNine/drogger_analyzer
+                </a>
+              </section>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Hide loader and mount the app
+document.getElementById('loader').style.display = 'none';
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<DroggerAnalyzer />);
+  </script>
+</body>
+</html>

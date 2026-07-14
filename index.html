@@ -74,8 +74,15 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.7";
+const APP_VERSION = "1.7.8";
 const CHANGELOG = [
+  {
+    version: "1.7.8",
+    date: "2026-07-13",
+    notes: [
+      "**修正: 開始時刻がスマホで入力不能（v1.7.7のテンキーにコロンが無い）。** 数字のみの入力を時刻として解釈するよう変更: 955→9:55、1345→13:45。入力欄の隣に解釈結果を緑色でライブ表示（読めない入力は赤の?）",
+    ],
+  },
   {
     version: "1.7.7",
     date: "2026-07-13",
@@ -1732,9 +1739,14 @@ const PaceEvolution = ({ session, height = 200 }) => {
 // ─── v1.7.5: wall-clock helpers ──────────────────────────────────
 const parseHMS = (str) => {
   if (!str) return null;
-  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
-  if (!m) return null;
-  return (+m[1]) * 3600 + (+m[2]) * 60 + (m[3] ? +m[3] : 0);
+  const t = String(str).trim();
+  let m = t.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (m) return (+m[1]) * 3600 + (+m[2]) * 60 + (m[3] ? +m[3] : 0);
+  // v1.7.8: digits-only entry for mobile numeric keypads (no colon key):
+  // "955" -> 9:55, "1345" -> 13:45
+  m = t.match(/^(\d{1,2})(\d{2})$/);
+  if (m && +m[1] < 24 && +m[2] < 60) return (+m[1]) * 3600 + (+m[2]) * 60;
+  return null;
 };
 const fmtClock = (sec) => {
   sec = Math.round(sec);
@@ -2208,10 +2220,12 @@ function DroggerAnalyzer() {
                 <span className="font-mono text-[9px] text-gray-500">開始時刻</span>
                 <input value={sessionStartTimes[activeSession.id] || ""}
                   onChange={(e) => setSessionStartTimes((st) => ({ ...st, [activeSession.id]: e.target.value }))}
-                  placeholder="HH:MM" inputMode="numeric"
+                  placeholder="955 = 9:55" inputMode="numeric"
                   className="font-mono bg-[#0a0e14] border border-[#252d3a] text-gray-200 focus:border-yellow-400 outline-none"
                   style={{ borderRadius: 2, padding: isMobile ? "8px 10px" : "2px 8px", fontSize: isMobile ? 16 : 11, width: isMobile ? 92 : 64 }} />
-                <span className="font-mono text-[8px] text-gray-600">実時刻換算・タイムライン用</span>
+                {(() => { const v = sessionStartTimes[activeSession.id]; if (!v) return null; const a = parseHMS(v);
+                  return <span className="font-mono text-[10px]" style={{ color: a != null ? "#34d399" : "#f87171" }}>{a != null ? "= " + fmtClock(a) : "?"}</span>; })()}
+                <span className="font-mono text-[8px] text-gray-600">数字のみでOK（955→9:55）</span>
               </div>
               {activeSession.stints.length === 0 ? (
                 <div className="text-[10px] font-mono text-gray-600 py-2">スティントが検出されませんでした</div>

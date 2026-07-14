@@ -74,8 +74,15 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.6";
+const APP_VERSION = "1.7.7";
 const CHANGELOG = [
+  {
+    version: "1.7.7",
+    date: "2026-07-13",
+    notes: [
+      "**修正: スマホで開始時刻(HH:MM)が入力できない問題。** iOS Safariはフォント16px未満の入力欄でフォーカス時に強制ズームするため入力が破綻していた。モバイルでは16px・大きめのタップ領域に変更（ライダー名入力と同仕様）。数字キーボードも指定",
+    ],
+  },
   {
     version: "1.7.6",
     date: "2026-07-13",
@@ -2201,7 +2208,9 @@ function DroggerAnalyzer() {
                 <span className="font-mono text-[9px] text-gray-500">開始時刻</span>
                 <input value={sessionStartTimes[activeSession.id] || ""}
                   onChange={(e) => setSessionStartTimes((st) => ({ ...st, [activeSession.id]: e.target.value }))}
-                  placeholder="HH:MM" className="font-mono text-[10px] bg-transparent border border-[#252d3a] text-gray-200 px-1.5 py-0.5 w-16" style={{ borderRadius: 2 }} />
+                  placeholder="HH:MM" inputMode="numeric"
+                  className="font-mono bg-[#0a0e14] border border-[#252d3a] text-gray-200 focus:border-yellow-400 outline-none"
+                  style={{ borderRadius: 2, padding: isMobile ? "8px 10px" : "2px 8px", fontSize: isMobile ? 16 : 11, width: isMobile ? 92 : 64 }} />
                 <span className="font-mono text-[8px] text-gray-600">実時刻換算・タイムライン用</span>
               </div>
               {activeSession.stints.length === 0 ? (

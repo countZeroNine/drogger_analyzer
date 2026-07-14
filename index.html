@@ -74,8 +74,15 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.8";
+const APP_VERSION = "1.7.9";
 const CHANGELOG = [
+  {
+    version: "1.7.9",
+    date: "2026-07-13",
+    notes: [
+      "**修正: 深いSCトレインでスティントが分断されタイムラインに偽の空白が出る問題。** スティントの分断条件を「遅いラップ」から「ラップ内に実停止(10秒以上)があるか」に変更。SC徐行（実測: 平均38〜46km/h・1周3分超）では切れず、交代・ピットでのみ切れる。超低速ラップは統計からは除外されるがスティントの連続性は保たれる",
+    ],
+  },
   {
     version: "1.7.8",
     date: "2026-07-13",
@@ -951,10 +958,18 @@ const parseSession = (rawData, name, type, options = {}) => {
   let stints = [];
   let cur = null;
   laps.forEach((lap) => {
-    if (!lap.isRacing) {
+    // v1.7.9: a stint breaks ONLY at an actual stop (pit / rider change)
+    // inside the lap — not merely at slow laps. Deep SC trains produce
+    // 160-200s laps (observed 2026-07-12: 38-46 km/h avg behind the SC)
+    // that exceeded the 1.7x-median racing ceiling and split the stint,
+    // leaving a bogus gap on the timeline although the bike never stopped.
+    const lapEnd = lap.startTime + lap.duration;
+    const hasStop = stops.some((sp) => sp.t >= lap.startTime && sp.t < lapEnd);
+    if (hasStop) {
       if (cur) { stints.push(cur); cur = null; }
       return;
     }
+    if (!lap.isRacing) return; // slow SC/out lap: excluded from stats, but does not break the stint
     if (!cur) cur = { id: newId(), startLap: lap.lap, endLap: lap.lap, laps: [lap] };
     else { cur.endLap = lap.lap; cur.laps.push(lap); }
   });

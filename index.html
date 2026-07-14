@@ -74,8 +74,19 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.4";
+const APP_VERSION = "1.7.5";
 const CHANGELOG = [
+  {
+    version: "1.7.5",
+    date: "2026-07-13",
+    notes: [
+      "**耐久レース向け機能3点を追加**",
+      "停止検出: 速度3km/h未満が10秒以上続く区間をピット/交代として一覧表示（左パネル）。エンジン停止中はログ自体が存在しない点に注意",
+      "SC/徐行ラップの自動判定と色付け: レーシングラップの25パーセンタイルをクリーンペース基準とし、その1.15倍以上を黄色でマーク（ラップ表・チップ）",
+      "実時刻タイムライン: 各セッションに開始時刻(HH:MM)を入力すると、Overviewに全ファイル横断のタイムラインを表示。誰がいつ走っていたかをライダー色で確認できる（aRacerログには時計チャンネルが無いため開始時刻の入力が必要）",
+      "**修正: IRラップビーコンの取りこぼし検証。** IRラップ番号が存在してもGPS検出と周回数を照合し、GPSが+3周(または+10%)以上多い場合はIRを不良と判定してGPSラップを採用（7/12決勝ログでIRが107分中21回しか計数していない事例を検出。60周超のスティントが21個の巨大ラップに化けてスティント割当を狂わせていた）",
+    ],
+  },
   {
     version: "1.7.4",
     date: "2026-07-12",
@@ -880,6 +891,29 @@ const parseSession = (rawData, name, type, options = {}) => {
   const racingMax = medianDur > 0 ? medianDur * 1.7 : 600;
   laps.forEach((l) => { l.isRacing = l.duration >= racingMin && l.duration <= racingMax; });
 
+  // v1.7.5: SC / slow-lap flag. Clean-pace reference = 25th percentile of
+  // racing laps (robust even when many SC laps inflate the median);
+  // laps >= 1.15x of it are marked as SC / heavy traffic / caution.
+  const racingSorted = laps.filter((l) => l.isRacing).map((l) => l.duration).sort((a, b) => a - b);
+  const cleanRef = racingSorted.length ? racingSorted[Math.floor(racingSorted.length * 0.25)] : 0;
+  laps.forEach((l) => { l.isSC = !!(l.isRacing && cleanRef > 0 && l.duration >= cleanRef * 1.15); });
+
+  // v1.7.5: pit / stop detection — continuous Speed<3 for >=10s while the
+  // logger was recording (engine-off gaps do not appear in the file at all).
+  const stops = [];
+  {
+    let si = 0;
+    while (si < rawData.length) {
+      if ((rawData[si].Speed || 0) < 3) {
+        let sj = si;
+        while (sj < rawData.length && (rawData[sj].Speed || 0) < 3) sj++;
+        const sdur = (rawData[sj - 1].RunTime || 0) - (rawData[si].RunTime || 0);
+        if (sdur >= 10) stops.push({ t: rawData[si].RunTime || 0, duration: sdur });
+        si = sj;
+      } else si++;
+    }
+  }
+
   let stints = [];
   let cur = null;
   laps.forEach((lap) => {
@@ -893,7 +927,7 @@ const parseSession = (rawData, name, type, options = {}) => {
   if (cur) stints.push(cur);
 
   return {
-    id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0,
+    id: newId(), name, type, engineType: "4st", laps, stints, medianLap: medianDur, lat0, lon0, stops,
     source,
     hasGps: hasGps && rawData.some((r) => r.Latitude !== 0 && r.Longitude !== 0),
     // lapRef is ONLY set when GPS-based lap detection was performed (aRacer LM).
@@ -1075,7 +1109,7 @@ const LapTable = ({ laps, selectedLap, onSelectLap, hasAfr, hasThrottle, lookupR
             const isSelected = selectedLap === s.lap;
             const isBest = bests.duration != null && s.duration === bests.duration;
             const delta = bests.duration != null ? s.duration - bests.duration : null;
-            const rowBg = isSelected ? "rgba(250,204,21,0.12)" : "transparent";
+            const rowBg = isSelected ? "rgba(250,204,21,0.12)" : (s.isSC ? "rgba(250,204,21,0.05)" : "transparent");
 
             return (
               <tr key={s.lap}
@@ -1093,6 +1127,7 @@ const LapTable = ({ laps, selectedLap, onSelectLap, hasAfr, hasThrottle, lookupR
                     {r && <span className="w-1.5 h-1.5" style={{ background: r.color, display: "inline-block" }}></span>}
                     {isBest && <span style={{ color: BEST_GREEN }}>★</span>}
                     L{s.lap}
+                    {s.isSC && <span className="font-mono" style={{ color: "#facc15", fontSize: 8, border: "1px solid #facc15", borderRadius: 2, padding: "0 2px" }}>SC</span>}
                   </span>
                 </td>
                 <td style={{ ...cellStyle, textAlign: "right", color: cellColor("duration", s.duration) || FG }} className={cellClass("duration", s.duration)}>
@@ -1667,6 +1702,78 @@ const PaceEvolution = ({ session, height = 200 }) => {
   );
 };
 
+// ─── v1.7.5: wall-clock helpers ──────────────────────────────────
+const parseHMS = (str) => {
+  if (!str) return null;
+  const m = String(str).trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!m) return null;
+  return (+m[1]) * 3600 + (+m[2]) * 60 + (m[3] ? +m[3] : 0);
+};
+const fmtClock = (sec) => {
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600) % 24;
+  const mi = Math.floor((sec % 3600) / 60);
+  return h + ":" + String(mi).padStart(2, "0");
+};
+
+// ─── v1.7.5: Race timeline (all anchored sessions on one wall-clock axis) ──
+const RaceTimeline = ({ sessions, sessionStartTimes, stintAssignments, riders, isMobile }) => {
+  const anchored = sessions.map((ss) => ({ ss, a: parseHMS(sessionStartTimes[ss.id]) })).filter((x) => x.a != null);
+  if (anchored.length === 0) return null;
+  let t0 = Infinity, t1 = -Infinity;
+  const blocks = [];
+  const stopMarks = [];
+  anchored.forEach(({ ss, a }) => {
+    const map = stintAssignments[ss.id] || {};
+    ss.stints.forEach((st) => {
+      const first = st.laps[0], last = st.laps[st.laps.length - 1];
+      const b0 = a + first.startTime, b1 = a + last.startTime + last.duration;
+      const rider = riders.find((r) => r.id === map[st.id]);
+      blocks.push({ b0, b1, color: rider ? rider.color : "#374151", name: rider ? rider.name : "?", laps: st.laps.length });
+      t0 = Math.min(t0, b0); t1 = Math.max(t1, b1);
+    });
+    (ss.stops || []).forEach((sp) => {
+      stopMarks.push({ b0: a + sp.t, b1: a + sp.t + sp.duration });
+      t0 = Math.min(t0, a + sp.t); t1 = Math.max(t1, a + sp.t + sp.duration);
+    });
+  });
+  if (!isFinite(t0) || t1 - t0 < 60) return null;
+  const span = t1 - t0;
+  const pct = (x) => (100 * (x - t0) / span).toFixed(2) + "%";
+  const step = span > 3.5 * 3600 ? 3600 : span > 5400 ? 1800 : 900;
+  const ticks = [];
+  for (let tt = Math.ceil(t0 / step) * step; tt <= t1; tt += step) ticks.push(tt);
+  return (
+    <Panel title={"Race Timeline — " + fmtClock(t0) + "〜" + fmtClock(t1)} accent>
+      <div className="p-3">
+        <div className="relative w-full" style={{ height: isMobile ? 50 : 44 }}>
+          <div className="absolute inset-x-0" style={{ top: 0, height: 24, background: "#11161f", borderRadius: 2 }}>
+            {blocks.map((b, i) => (
+              <div key={i} className="absolute overflow-hidden"
+                title={b.name + " " + fmtClock(b.b0) + "–" + fmtClock(b.b1) + " (" + b.laps + " laps)"}
+                style={{ left: pct(b.b0), width: Math.max(0.3, 100 * (b.b1 - b.b0) / span) + "%", top: 0, bottom: 0, background: b.color, opacity: 0.85 }}>
+                <span className="font-mono text-[8px] text-black px-0.5" style={{ whiteSpace: "nowrap" }}>{b.name}</span>
+              </div>
+            ))}
+            {stopMarks.map((m, i) => (
+              <div key={"s" + i} className="absolute"
+                title={"停止 " + fmtClock(m.b0) + " (" + Math.round(m.b1 - m.b0) + "s)"}
+                style={{ left: pct(m.b0), width: Math.max(0.15, 100 * (m.b1 - m.b0) / span) + "%", top: 0, bottom: 0, background: "#0a0e14", borderLeft: "1px solid #f87171" }} />
+            ))}
+          </div>
+          {ticks.map((tt, i) => (
+            <div key={i} className="absolute font-mono text-[8px] text-gray-500" style={{ left: pct(tt), top: 27, transform: "translateX(-50%)" }}>
+              <div style={{ width: 1, height: 4, background: "#374151", margin: "0 auto" }}></div>
+              {fmtClock(tt)}
+            </div>
+          ))}
+        </div>
+        <div className="font-mono text-[8px] text-gray-600 mt-2">左パネルで各セッションの「開始時刻」を入力すると全ファイルが実時刻軸に並びます。色=割当ライダー、赤線=停止（交代/ピット）。</div>
+      </div>
+    </Panel>
+  );
+};
+
 // ─── Responsive: detect mobile (< 768px) ─────────────────────────
 const useIsMobile = (breakpoint = 768) => {
   const [isMobile, setIsMobile] = useState(typeof window !== "undefined" ? window.innerWidth < breakpoint : false);
@@ -1684,6 +1791,7 @@ function DroggerAnalyzer() {
   const [activeSessionId, setActiveSessionId] = useState(null);
   const [riders, setRiders] = useState([]);
   const [stintAssignments, setStintAssignments] = useState({});
+  const [sessionStartTimes, setSessionStartTimes] = useState({}); // v1.7.5: session.id -> "HH:MM"
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedLap, setSelectedLap] = useState(null);
   const [compareLap, setCompareLap] = useState(null);
@@ -1748,11 +1856,36 @@ function DroggerAnalyzer() {
             setParseError(`${file.name}: aRacer ログのデータが空です`);
             continue;
           }
-          // For aRacer LM with valid GPS but empty IR_LapNumber: detect laps from GPS trajectory
+          // For aRacer LM with valid GPS but empty IR_LapNumber: detect laps from GPS trajectory.
+          // v1.7.5: even when IR lap numbers are present, validate them against GPS —
+          // a partially-working IR beacon (e.g. 21 counts over a 58-lap race stint,
+          // observed 2026-07-12 Tsukuba) silently produces multi-lap "laps". If GPS
+          // detects >=1.4x more laps than IR counted, IR is deemed unreliable and
+          // GPS lap detection wins.
           const allZeroLap = data.every((r) => r.Lap === 0);
           let lapRef = null;
           if (hasGps && allZeroLap) {
             lapRef = detectLapsFromGps(data);
+          } else if (hasGps && !allZeroLap) {
+            // detectLapsFromGps mutates data (Lap / LapRunTime / LapTime) in
+            // place, so snapshot the IR values first and restore them if the
+            // IR beacon turns out to be the better source.
+            const irLap = data.map((r) => r.Lap);
+            const irLapRun = data.map((r) => r.LapRunTime);
+            const irLapTime = data.map((r) => r.LapTime);
+            const irLapCount = new Set(irLap.filter((v) => v > 0)).size;
+            const gpsRef = detectLapsFromGps(data);
+            if (gpsRef) {
+              const gpsLapCount = new Set(data.map((r) => r.Lap).filter((v) => v > 0)).size;
+              // GPS wins if it finds meaningfully more crossings than the IR
+              // beacon counted (>= +3 laps or +10%, whichever is larger) — a
+              // beacon that misses gates merges laps and corrupts every stat.
+              if (gpsLapCount >= irLapCount + Math.max(3, Math.round(irLapCount * 0.1))) {
+                lapRef = gpsRef; // IR beacon unreliable -> keep GPS lap numbering
+              } else {
+                data.forEach((r, i) => { r.Lap = irLap[i]; r.LapRunTime = irLapRun[i]; r.LapTime = irLapTime[i]; });
+              }
+            }
           }
           const session = parseSession(data, baseName, type, { source: fmt, hasGps, lapRef });
           newSessions.push(session);
@@ -2044,6 +2177,13 @@ function DroggerAnalyzer() {
                 <Users size={11} /> Stint Assignment
                 <span className="text-gray-700 normal-case tracking-normal">— {activeSession.stints.length} detected</span>
               </div>
+              <div className="mb-2 flex items-center gap-1.5">
+                <span className="font-mono text-[9px] text-gray-500">開始時刻</span>
+                <input value={sessionStartTimes[activeSession.id] || ""}
+                  onChange={(e) => setSessionStartTimes((st) => ({ ...st, [activeSession.id]: e.target.value }))}
+                  placeholder="HH:MM" className="font-mono text-[10px] bg-transparent border border-[#252d3a] text-gray-200 px-1.5 py-0.5 w-16" style={{ borderRadius: 2 }} />
+                <span className="font-mono text-[8px] text-gray-600">実時刻換算・タイムライン用</span>
+              </div>
               {activeSession.stints.length === 0 ? (
                 <div className="text-[10px] font-mono text-gray-600 py-2">スティントが検出されませんでした</div>
               ) : (
@@ -2062,12 +2202,41 @@ function DroggerAnalyzer() {
                           <div className="font-mono text-[9px] text-gray-500 mt-0.5">
                             {st.laps.length} laps · {(st.laps.reduce((a, l) => a + l.duration, 0) / 60).toFixed(1)}m
                           </div>
+                          {(() => {
+                            const scN = st.laps.filter((l) => l.isSC).length;
+                            const a = parseHMS(sessionStartTimes[activeSession.id]);
+                            const first = st.laps[0], lastL = st.laps[st.laps.length - 1];
+                            return (
+                              <div className="font-mono text-[9px] mt-0.5">
+                                {a != null && <span className="text-cyan-500">{fmtClock(a + first.startTime)}–{fmtClock(a + lastL.startTime + lastL.duration)}</span>}
+                                {scN > 0 && <span className="text-yellow-500 ml-1.5">SC/徐行 {scN}周</span>}
+                              </div>
+                            );
+                          })()}
                         </div>
                         <RiderSelect value={riderId} onChange={(rid) => assignStintToRider(activeSession.id, st.id, rid)}
                           riders={riders} placeholder="未割当" small />
                       </div>
                     );
                   })}
+                </div>
+              )}
+              {activeSession.stops && activeSession.stops.length > 0 && (
+                <div className="mt-3">
+                  <div className="text-[10px] uppercase tracking-[0.18em] font-mono text-gray-500 mb-1.5">Pit / Stops — {activeSession.stops.length}</div>
+                  <div className="space-y-1">
+                    {activeSession.stops.map((sp, i) => {
+                      const a = parseHMS(sessionStartTimes[activeSession.id]);
+                      return (
+                        <div key={i} className="font-mono text-[10px] text-gray-400 border border-[#252d3a] px-2 py-1 flex items-center gap-1.5" style={{ background: PANEL_2, borderRadius: 2 }}>
+                          <span className="text-red-400">■</span>
+                          <span>{a != null ? fmtClock(a + sp.t) : "+" + fmtTime(sp.t)}</span>
+                          <span className="text-gray-600">·</span>
+                          <span>停止 {Math.round(sp.duration)}s</span>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
             </div>
@@ -2153,6 +2322,7 @@ function DroggerAnalyzer() {
 
               <div className={`flex-1 overflow-y-auto space-y-3 ${isMobile ? "p-2" : "p-4 space-y-4"}`}>
                 {activeTab === "overview" && (<>
+                  <RaceTimeline sessions={sessions} sessionStartTimes={sessionStartTimes} stintAssignments={stintAssignments} riders={riders} isMobile={isMobile} />
                   <div className={`grid gap-3 ${isMobile ? "grid-cols-2" : "grid-cols-6"}`}>
                     {(() => {
                       const racing = activeSession.laps.filter((l) => l.isRacing);
@@ -2208,7 +2378,7 @@ function DroggerAnalyzer() {
                               className={`font-mono border flex items-center gap-1.5 ${selectedLap === l.lap ? "border-yellow-400 bg-yellow-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-yellow-400"}`}
                               style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
                               {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
-                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>{l.isSC && <span style={{ color: "#facc15", fontSize: 8 }}>SC</span>}
                             </button>
                           );
                         })}
@@ -2335,7 +2505,7 @@ function DroggerAnalyzer() {
                               className={`font-mono border flex items-center gap-1.5 ${selectedLap === l.lap ? "border-yellow-400 bg-yellow-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-yellow-400"}`}
                               style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
                               {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
-                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>{l.isSC && <span style={{ color: "#facc15", fontSize: 8 }}>SC</span>}
                             </button>
                           );
                         })}
@@ -2350,7 +2520,7 @@ function DroggerAnalyzer() {
                               className={`font-mono border flex items-center gap-1.5 ${compareLap === l.lap ? "border-cyan-400 bg-cyan-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-cyan-400"}`}
                               style={{ borderRadius: 2, padding: isMobile ? "6px 10px" : "4px 8px", fontSize: isMobile ? 11 : 10, touchAction: "manipulation" }}>
                               {r && <span className="w-1.5 h-1.5" style={{ background: r.color }}></span>}
-                              <span>L{l.lap} · {fmtTime(l.duration)}</span>
+                              <span>L{l.lap} · {fmtTime(l.duration)}</span>{l.isSC && <span style={{ color: "#facc15", fontSize: 8 }}>SC</span>}
                             </button>
                           );
                         })}

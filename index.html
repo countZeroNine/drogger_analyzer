@@ -74,8 +74,17 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.9";
+const APP_VERSION = "1.8.0";
 const CHANGELOG = [
+  {
+    version: "1.8.0",
+    date: "2026-07-13",
+    notes: [
+      "**チーム設定の永続化。** ライダー名簿（名前・色）、スティント割当、セッション開始時刻をブラウザに自動保存。同じファイル名のログを読み込むと自動復元される（設定はファイル名で紐付くため、本戦1〜5のような安定した命名を推奨）",
+      "設定のJSON書き出し/読み込みボタンを名簿横に追加（機種変更・チーム内共有用）",
+      "注: ブラウザのサイトデータ消去で自動保存分は消えるため、大事な設定は書き出し推奨",
+    ],
+  },
   {
     version: "1.7.9",
     date: "2026-07-13",
@@ -1751,6 +1760,17 @@ const PaceEvolution = ({ session, height = 200 }) => {
   );
 };
 
+// ─── v1.8.0: team settings persistence (localStorage + JSON file) ─
+// Keyed by session NAME (file name), so renaming files to a stable scheme
+// (e.g. 本戦1〜5) makes settings stick across reloads and devices.
+const TEAM_STORE_KEY = "drogger_team_settings_v1";
+const loadTeamStore = () => {
+  try { return JSON.parse(localStorage.getItem(TEAM_STORE_KEY)) || null; } catch (e) { return null; }
+};
+const saveTeamStore = (store) => {
+  try { localStorage.setItem(TEAM_STORE_KEY, JSON.stringify(store)); } catch (e) {}
+};
+
 // ─── v1.7.5: wall-clock helpers ──────────────────────────────────
 const parseHMS = (str) => {
   if (!str) return null;
@@ -1843,9 +1863,74 @@ const useIsMobile = (breakpoint = 768) => {
 function DroggerAnalyzer() {
   const [sessions, setSessions] = useState([]);
   const [activeSessionId, setActiveSessionId] = useState(null);
-  const [riders, setRiders] = useState([]);
+  const [riders, setRiders] = useState(() => {
+    const st = loadTeamStore();
+    return st && Array.isArray(st.riders) && st.riders.length ? st.riders : [];
+  });
   const [stintAssignments, setStintAssignments] = useState({});
   const [sessionStartTimes, setSessionStartTimes] = useState({}); // v1.7.5: session.id -> "HH:MM"
+
+  // v1.8.0: auto-persist team settings. Merged with the stored map so
+  // settings of files not currently loaded are never lost.
+  useEffect(() => {
+    const store = { v: 1, riders, sessions: {} };
+    sessions.forEach((ss) => {
+      const stintMap = {};
+      (ss.stints || []).forEach((st, i) => {
+        const rid = (stintAssignments[ss.id] || {})[st.id];
+        if (rid) stintMap[i] = rid;
+      });
+      const start = sessionStartTimes[ss.id];
+      if (start || Object.keys(stintMap).length) store.sessions[ss.name] = { start: start || "", stints: stintMap };
+    });
+    const prev = loadTeamStore();
+    if (prev && prev.sessions) store.sessions = { ...prev.sessions, ...store.sessions };
+    saveTeamStore(store);
+  }, [riders, sessions, stintAssignments, sessionStartTimes]);
+
+  // v1.8.0: apply saved settings (by file name) to freshly loaded sessions.
+  const hydrateSessions = useCallback((sessList, store) => {
+    if (!store || !store.sessions) return;
+    const startUpd = {}; const saUpd = {};
+    sessList.forEach((ss) => {
+      const saved = store.sessions[ss.name];
+      if (!saved) return;
+      if (saved.start) startUpd[ss.id] = saved.start;
+      const m = {};
+      (ss.stints || []).forEach((st, i) => {
+        const rid = saved.stints && (saved.stints[i] !== undefined ? saved.stints[i] : saved.stints[String(i)]);
+        if (rid) m[st.id] = rid;
+      });
+      if (Object.keys(m).length) saUpd[ss.id] = m;
+    });
+    if (Object.keys(startUpd).length) setSessionStartTimes((x) => ({ ...x, ...startUpd }));
+    if (Object.keys(saUpd).length) setStintAssignments((x) => ({ ...x, ...saUpd }));
+  }, []);
+
+  // v1.8.0: export / import settings as a JSON file (device transfer / team share)
+  const exportTeamSettings = () => {
+    const store = loadTeamStore() || { v: 1, riders, sessions: {} };
+    store.riders = riders;
+    const blob = new Blob([JSON.stringify(store, null, 2)], { type: "application/json" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "team_settings.json";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const importTeamSettings = (file) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const store = JSON.parse(reader.result);
+        if (!store || !Array.isArray(store.riders)) throw new Error("形式が不正です");
+        saveTeamStore(store);
+        setRiders(store.riders);
+        hydrateSessions(sessions, store);
+      } catch (e) { setParseError("設定ファイルの読み込み失敗: " + e.message); }
+    };
+    reader.readAsText(file);
+  };
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedLap, setSelectedLap] = useState(null);
   const [compareLap, setCompareLap] = useState(null);
@@ -1958,6 +2043,7 @@ function DroggerAnalyzer() {
         return next;
       });
       setRiders((rs) => rs.length === 0 ? [{ id: newId(), name: "Rider 1", color: RIDER_COLORS[0] }] : rs);
+      hydrateSessions(newSessions, loadTeamStore()); // v1.8.0: restore saved start times / stint riders by file name
     }
   }, [activeSessionId]);
 
@@ -2172,6 +2258,12 @@ function DroggerAnalyzer() {
                 <UserCog size={11} /> Team Roster
               </div>
               <Btn small onClick={addRider}><Plus size={10} className="inline" /> Rider</Btn>
+              <Btn small onClick={exportTeamSettings} title="ライダー・割当・開始時刻をJSONで書き出し">保存</Btn>
+              <label className="cursor-pointer">
+                <span className="font-mono text-[10px] uppercase tracking-wider border border-[#252d3a] text-gray-300 hover:border-yellow-400 inline-block" style={{ borderRadius: 2, padding: "3px 8px" }}>読込</span>
+                <input type="file" accept=".json,application/json" className="hidden"
+                  onChange={(e) => { const f = e.target.files && e.target.files[0]; if (f) importTeamSettings(f); e.target.value = ""; }} />
+              </label>
             </div>
             {riders.length === 0 ? (
               <div className="text-[10px] font-mono text-gray-600 py-2">ライダーを追加してください</div>

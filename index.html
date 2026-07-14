@@ -74,8 +74,16 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.7.5";
+const APP_VERSION = "1.7.6";
 const CHANGELOG = [
+  {
+    version: "1.7.6",
+    date: "2026-07-13",
+    notes: [
+      "**修正: ピットイン周が最速ラップに化ける問題。** 筑波のようにピットレーンがホームストレートと並走するコースでは、S/F判定ゲート（GPS精度対策で±20m延長）をピット走行中に横切り、62秒・平均14km/hのような偽ラップが生成されBEST認定されていた。平均速度がセッション中央値の55%未満のラップをレーシングラップから除外して解決",
+      "補足: ライダーの色は名簿の色四角をタップすると自由に変更できます（以前から可能）",
+    ],
+  },
   {
     version: "1.7.5",
     date: "2026-07-13",
@@ -889,7 +897,19 @@ const parseSession = (rawData, name, type, options = {}) => {
     : 0;
   const racingMin = medianDur > 0 ? medianDur * 0.55 : 10;
   const racingMax = medianDur > 0 ? medianDur * 1.7 : 600;
-  laps.forEach((l) => { l.isRacing = l.duration >= racingMin && l.duration <= racingMax; });
+  // v1.7.6: a "lap" whose average speed is far below the field is not a lap —
+  // it is a pit-lane transit. At circuits where the pit lane runs parallel to
+  // the main straight (e.g. Tsukuba), the extended S/F gate can be crossed at
+  // pit speed, creating a short bogus lap that then wins "BEST" (observed:
+  // 62s / avg 14 km/h pit-stop lap flagged as best of a race stint).
+  const plausibleAvgSpd = laps
+    .filter((l) => l.duration > 10 && l.duration < 600 && l.avgSpeed > 0)
+    .map((l) => l.avgSpeed).sort((a, b) => a - b);
+  const medAvgSpd = plausibleAvgSpd.length ? plausibleAvgSpd[Math.floor(plausibleAvgSpd.length / 2)] : 0;
+  laps.forEach((l) => {
+    l.isRacing = l.duration >= racingMin && l.duration <= racingMax &&
+      (medAvgSpd <= 0 || l.avgSpeed >= medAvgSpd * 0.55);
+  });
 
   // v1.7.5: SC / slow-lap flag. Clean-pace reference = 25th percentile of
   // racing laps (robust even when many SC laps inflate the median);

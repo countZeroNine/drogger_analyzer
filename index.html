@@ -74,8 +74,15 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.8.2";
+const APP_VERSION = "1.8.3";
 const CHANGELOG = [
+  {
+    version: "1.8.3",
+    date: "2026-07-16",
+    notes: [
+      "**DroggerファイルにもGPSラップ検証を適用。** DroggerアプリのS/F設定忘れ・設定ミスでデバイス記録ラップが欠落している場合、GPS検出（CIRCUITS DB）が+3周以上多くのラップを見つければ自動で肩代わりする（aRacer経路のv1.7.5検証と同一ロジック）。正常なDroggerラップはこれまで通りデバイス記録が優先される",
+    ],
+  },
   {
     version: "1.8.2",
     date: "2026-07-16",
@@ -2004,7 +2011,27 @@ function DroggerAnalyzer() {
             setParseError(`${file.name}: Drogger CSVではないようです（Lap列がありません）`);
             continue;
           }
-          const session = parseSession(parsed.data, baseName, type, { source: "drogger", hasGps: true });
+          // v1.8.3: same lap-source validation as the aRacer path. Protects
+          // against a forgotten / mis-set S/F line in the Drogger app: device
+          // laps are -1 (or missing) in that case, and even a badly placed
+          // S/F undercounts. GPS detection (CIRCUITS DB) takes over when it
+          // finds meaningfully more laps than the device recorded.
+          const dData = parsed.data;
+          const devLap = dData.map((r) => r.Lap);
+          const devLapRun = dData.map((r) => r.LapRunTime);
+          const devLapTime = dData.map((r) => r.LapTime);
+          const devCount = new Set(devLap.filter((v) => v > 0)).size;
+          let dLapRef = null;
+          const dGpsRef = detectLapsFromGps(dData);
+          if (dGpsRef) {
+            const gpsCount = new Set(dData.map((r) => r.Lap).filter((v) => v > 0)).size;
+            if (gpsCount >= devCount + Math.max(3, Math.round(devCount * 0.1))) {
+              dLapRef = dGpsRef; // device laps missing/unreliable -> GPS laps
+            } else {
+              dData.forEach((r, i) => { r.Lap = devLap[i]; r.LapRunTime = devLapRun[i]; r.LapTime = devLapTime[i]; });
+            }
+          }
+          const session = parseSession(dData, baseName, type, { source: "drogger", hasGps: true, lapRef: dLapRef });
           newSessions.push(session);
         } else if (fmt === "aracer_sp" || fmt === "aracer_ecu" || fmt === "aracer_lm") {
           const { data, hasGps } = parseAracerLog(text, fmt);

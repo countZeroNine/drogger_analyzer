@@ -74,11 +74,19 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.8.1";
+const APP_VERSION = "1.8.2";
 const CHANGELOG = [
   {
+    version: "1.8.2",
+    date: "2026-07-16",
+    notes: [
+      "**別サーキット比較のガード。** クロスファイル比較で基準側と比較側のS/Fラインが100m以上離れている場合（同一施設内の別コースを含む）、警告バナーを表示しTrack Overlayを無効化。GPS検出のS/F基準が無いセッションは原点(初回GPS取得点)で代替判定（閾値2km）",
+      "チェンジログの日付を実作業日に修正（v1.7.5〜1.8.1は2026-07-16の作業）",
+    ],
+  },
+  {
     version: "1.8.1",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**Compareタブのクロスファイル比較。** 比較ラップ(シアン)を読み込み済みの任意のセッションから選択可能に（Compare Lapパネル上部のFromセレクタ）。別ファイルに分かれたライダー同士——例: 岸田(本戦2)のベスト vs 小室(本戦4)のベスト——の速度・回転・TPS・軌跡の重ね合わせと同時再生ができる",
       "座標は基準ラップ側の原点で共通投影、テレメトリは距離軸のため、同一サーキットのファイル間で正しく重なる",
@@ -86,7 +94,7 @@ const CHANGELOG = [
   },
   {
     version: "1.8.0",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**チーム設定の永続化。** ライダー名簿（名前・色）、スティント割当、セッション開始時刻をブラウザに自動保存。同じファイル名のログを読み込むと自動復元される（設定はファイル名で紐付くため、本戦1〜5のような安定した命名を推奨）",
       "設定のJSON書き出し/読み込みボタンを名簿横に追加（機種変更・チーム内共有用）",
@@ -95,28 +103,28 @@ const CHANGELOG = [
   },
   {
     version: "1.7.9",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**修正: 深いSCトレインでスティントが分断されタイムラインに偽の空白が出る問題。** スティントの分断条件を「遅いラップ」から「ラップ内に実停止(10秒以上)があるか」に変更。SC徐行（実測: 平均38〜46km/h・1周3分超）では切れず、交代・ピットでのみ切れる。超低速ラップは統計からは除外されるがスティントの連続性は保たれる",
     ],
   },
   {
     version: "1.7.8",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**修正: 開始時刻がスマホで入力不能（v1.7.7のテンキーにコロンが無い）。** 数字のみの入力を時刻として解釈するよう変更: 955→9:55、1345→13:45。入力欄の隣に解釈結果を緑色でライブ表示（読めない入力は赤の?）",
     ],
   },
   {
     version: "1.7.7",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**修正: スマホで開始時刻(HH:MM)が入力できない問題。** iOS Safariはフォント16px未満の入力欄でフォーカス時に強制ズームするため入力が破綻していた。モバイルでは16px・大きめのタップ領域に変更（ライダー名入力と同仕様）。数字キーボードも指定",
     ],
   },
   {
     version: "1.7.6",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**修正: ピットイン周が最速ラップに化ける問題。** 筑波のようにピットレーンがホームストレートと並走するコースでは、S/F判定ゲート（GPS精度対策で±20m延長）をピット走行中に横切り、62秒・平均14km/hのような偽ラップが生成されBEST認定されていた。平均速度がセッション中央値の55%未満のラップをレーシングラップから除外して解決",
       "補足: ライダーの色は名簿の色四角をタップすると自由に変更できます（以前から可能）",
@@ -124,7 +132,7 @@ const CHANGELOG = [
   },
   {
     version: "1.7.5",
-    date: "2026-07-13",
+    date: "2026-07-16",
     notes: [
       "**耐久レース向け機能3点を追加**",
       "停止検出: 速度3km/h未満が10秒以上続く区間をピット/交代として一覧表示（左パネル）。エンジン停止中はログ自体が存在しない点に注意",
@@ -2170,6 +2178,24 @@ function DroggerAnalyzer() {
   // so overlays remain valid across files of the same circuit.
   const compareSession = sessions.find((ss) => ss.id === compareSessionId) || activeSession;
   const compareLapObj = compareSession?.laps.find((l) => l.lap === compareLap);
+  // v1.8.2: different-circuit guard. Criterion (per team convention): S/F
+  // lines >100m apart = different course — facilities can host multiple
+  // courses (e.g. TC2000 vs TC1000), so name matching is not enough. When a
+  // session has no GPS-detected S/F reference we fall back to the session
+  // origin (first GPS fix, pit area) with a looser 2km threshold.
+  const circuitGap = useMemo(() => {
+    if (!compareSessionId || !activeSession || compareSession === activeSession) return null;
+    const pt = (ss) => ss.lapRef && ss.lapRef.Latitude
+      ? { lat: ss.lapRef.Latitude, lon: ss.lapRef.Longitude, precise: true }
+      : (ss.lat0 ? { lat: ss.lat0, lon: ss.lon0, precise: false } : null);
+    const A = pt(activeSession), B = pt(compareSession);
+    if (!A || !B) return null;
+    const R = 6371000, toR = Math.PI / 180;
+    const dLat = (B.lat - A.lat) * toR, dLon = (B.lon - A.lon) * toR, mLat = ((A.lat + B.lat) / 2) * toR;
+    const m = R * Math.sqrt(dLat * dLat + Math.cos(mLat) * Math.cos(mLat) * dLon * dLon);
+    return { m, precise: A.precise && B.precise };
+  }, [compareSessionId, activeSession, compareSession]);
+  const circuitMismatch = !!(circuitGap && (circuitGap.precise ? circuitGap.m > 100 : circuitGap.m > 2000));
 
   // Reset playback when lap selection changes
   useEffect(() => {
@@ -2710,6 +2736,13 @@ function DroggerAnalyzer() {
                       </div>
                     </Panel>
                   </div>
+                  {circuitMismatch && (
+                    <div className="border font-mono text-[11px] px-3 py-2 flex items-center gap-2"
+                      style={{ borderColor: "#f87171", background: "rgba(248,113,113,0.08)", color: "#f87171", borderRadius: 2 }}>
+                      <span>⚠</span>
+                      <span>別コースの可能性: S/F{circuitGap.precise ? "ライン" : "基準点"}間 {circuitGap.m >= 1000 ? (circuitGap.m / 1000).toFixed(1) + "km" : Math.round(circuitGap.m) + "m"} 離れています。Track Overlayは重なりません。距離軸テレメトリも別コース間ではコース形状が異なるため参考値です。</span>
+                    </div>
+                  )}
                   {selectedLapObj && (<>
                     {/* Playback controls + dual telemetry readout */}
                     <Panel title="Playback — both laps animate in real time" accent>
@@ -2776,8 +2809,12 @@ function DroggerAnalyzer() {
                     </Panel>
 
                     <Panel title="Track Overlay" accent>
+                      {circuitMismatch ? (
+                        <div className="p-6 text-center font-mono text-xs text-gray-500">別コースのため重ね合わせ表示は無効です</div>
+                      ) : (
                       <TrackPlot lap={selectedLapObj} overlay={compareLapObj} lat0={activeSession.lat0} lon0={activeSession.lon0}
                         cursorSample={refCursor} overlayCursorSample={cmpCursor} lapRef={activeSession.lapRef} height={isMobile ? 360 : 380} />
+                      )}
                     </Panel>
                     <Panel title={`Telemetry — Speed / RPM${activeSession.hasAfr ? " / A/F" : ""}${activeSession.hasThrottle ? " / TPS" : ""} vs distance`} accent>
                       <div className="p-2">

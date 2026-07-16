@@ -74,8 +74,16 @@ const STROKE = "#252d3a";
 const RIDER_COLORS = ["#22d3ee", "#facc15", "#f472b6", "#a78bfa", "#fb923c", "#34d399", "#f87171", "#60a5fa"];
 
 // ─── App version & changelog ─────────────────────────────────────
-const APP_VERSION = "1.8.0";
+const APP_VERSION = "1.8.1";
 const CHANGELOG = [
+  {
+    version: "1.8.1",
+    date: "2026-07-13",
+    notes: [
+      "**Compareタブのクロスファイル比較。** 比較ラップ(シアン)を読み込み済みの任意のセッションから選択可能に（Compare Lapパネル上部のFromセレクタ）。別ファイルに分かれたライダー同士——例: 岸田(本戦2)のベスト vs 小室(本戦4)のベスト——の速度・回転・TPS・軌跡の重ね合わせと同時再生ができる",
+      "座標は基準ラップ側の原点で共通投影、テレメトリは距離軸のため、同一サーキットのファイル間で正しく重なる",
+    ],
+  },
   {
     version: "1.8.0",
     date: "2026-07-13",
@@ -1934,6 +1942,7 @@ function DroggerAnalyzer() {
   const [activeTab, setActiveTab] = useState("overview");
   const [selectedLap, setSelectedLap] = useState(null);
   const [compareLap, setCompareLap] = useState(null);
+  const [compareSessionId, setCompareSessionId] = useState(null); // v1.8.1: null = activeSessionから比較
   const [parseError, setParseError] = useState(null);
   // Lap line edit mode (manual override of auto-detected S/F position)
   const [lapLineEditMode, setLapLineEditMode] = useState(false);
@@ -2116,6 +2125,16 @@ function DroggerAnalyzer() {
     return riders.find((r) => r.id === riderId) || null;
   }, [activeSession, activeStintMap, riders]);
 
+  // v1.8.1: rider lookup for an arbitrary session (compare panel)
+  const lookupRiderForLapIn = useCallback((sess, lapNum) => {
+    if (!sess) return null;
+    const stint = sess.stints.find((st) => lapNum >= st.startLap && lapNum <= st.endLap);
+    if (!stint) return null;
+    const riderId = (stintAssignments[sess.id] || {})[stint.id];
+    if (!riderId) return null;
+    return riders.find((r) => r.id === riderId) || null;
+  }, [stintAssignments, riders]);
+
   const riderStats = useMemo(() => {
     if (!activeSession) return [];
     return riders.map((r) => {
@@ -2145,7 +2164,12 @@ function DroggerAnalyzer() {
   }, [activeSession]);
 
   const selectedLapObj = activeSession?.laps.find((l) => l.lap === selectedLap);
-  const compareLapObj = activeSession?.laps.find((l) => l.lap === compareLap);
+  // v1.8.1: cross-session comparison — the compare lap may come from any
+  // loaded session (e.g. 岸田 in 本戦2 vs 小室 in 本戦4). Coordinates are
+  // projected with the reference session origin, telemetry is distance-based,
+  // so overlays remain valid across files of the same circuit.
+  const compareSession = sessions.find((ss) => ss.id === compareSessionId) || activeSession;
+  const compareLapObj = compareSession?.laps.find((l) => l.lap === compareLap);
 
   // Reset playback when lap selection changes
   useEffect(() => {
@@ -2662,9 +2686,18 @@ function DroggerAnalyzer() {
                       </div>
                     </Panel>
                     <Panel title="Compare Lap (cyan)" accent>
+                      <div className="px-3 pt-2 flex items-center gap-2">
+                        <span className="font-mono text-[9px] text-gray-500 uppercase tracking-wider">From</span>
+                        <select value={compareSession.id}
+                          onChange={(e) => { setCompareSessionId(e.target.value === activeSession.id ? null : e.target.value); setCompareLap(null); }}
+                          className="bg-[#0a0e14] border border-[#252d3a] text-gray-200 font-mono cursor-pointer hover:border-cyan-400 outline-none flex-1"
+                          style={{ borderRadius: 2, padding: isMobile ? "8px 8px" : "3px 8px", fontSize: isMobile ? 13 : 10, maxWidth: "100%" }}>
+                          {sessions.map((ss) => (<option key={ss.id} value={ss.id}>{ss.name}</option>))}
+                        </select>
+                      </div>
                       <div className="p-3 flex flex-wrap gap-1.5 max-h-32 overflow-y-auto">
-                        {activeSession.laps.filter((l) => l.isRacing).map((l) => {
-                          const r = lookupRiderForLap(l.lap);
+                        {compareSession.laps.filter((l) => l.isRacing).map((l) => {
+                          const r = lookupRiderForLapIn(compareSession, l.lap);
                           return (
                             <button key={l.lap} onClick={() => setCompareLap(l.lap)}
                               className={`font-mono border flex items-center gap-1.5 ${compareLap === l.lap ? "border-cyan-400 bg-cyan-400 text-black" : "border-[#252d3a] text-gray-300 hover:border-cyan-400"}`}
@@ -2718,7 +2751,7 @@ function DroggerAnalyzer() {
                         </div>
                         {compareLapObj ? (
                           <div className="grid gap-3 p-3" style={{ borderLeft: "3px solid #22d3ee", gridTemplateColumns: "repeat(auto-fill, minmax(80px, 1fr))" }}>
-                            <Stat label={`Lap ${compareLapObj.lap} · time`} value={fmtTime(cmpElapsedDisplay)} />
+                            <Stat label={`${compareSessionId ? "[別ファイル] " : ""}Lap ${compareLapObj.lap} · time`} value={fmtTime(cmpElapsedDisplay)} />
                             <Stat label="Speed" value={fmtNum(cmpCursor?.Speed ?? 0, 1)} unit="km/h" />
                             <Stat label="RPM" value={(cmpCursor?.Rpm ?? 0).toFixed(0)} />
                             {activeSession.hasAfr && (
